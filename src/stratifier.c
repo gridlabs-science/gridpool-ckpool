@@ -594,7 +594,8 @@ static void generate_coinbase(ckpool_t *ckp, workbase_t *wb)
 	LOGDEBUG("Coinb1: %s", wb->coinb1);
 	/* Coinbase 1 complete */
 
-	memcpy(wb->coinb2bin + wb->coinb2len, "\xff\xff\xff\xff", 4);
+	/* BIP54 requires the coinbase's nSequence be anything but the maximum value. */
+	memcpy(wb->coinb2bin + wb->coinb2len, "\xff\xff\xff\xfe", 4);
 	wb->coinb2len += 4;
 
 	// Generation value
