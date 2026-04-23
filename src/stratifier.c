@@ -527,6 +527,7 @@ static const int witnessdata_size = 36; // commitment header + hash
 static void generate_coinbase(ckpool_t *ckp, workbase_t *wb)
 {
 	uint64_t *u64, g64, d64 = 0;
+	uint32_t *u32;
 	sdata_t *sdata = ckp->sdata;
 	char header[272];
 	int len, ofs = 0;
@@ -639,7 +640,10 @@ static void generate_coinbase(ckpool_t *ckp, workbase_t *wb)
 		wb->coinb3len += witnessdata_size;
 	}
 
-	wb->coinb3len += 4; // Blank lock
+	/* Set nLockTime to block height minus 1 as per BIP 54. */
+	u32 = (uint32_t *)&wb->coinb3bin[wb->coinb3len];
+	*u32 = htole32(wb->height - 1);
+	wb->coinb3len += 4;
 
 	if (!ckp->btcsolo) {
 		int coinbase_len, offset = 0;
