@@ -6012,9 +6012,8 @@ static void check_best_diff(sdata_t *sdata, user_instance_t *user,worker_instanc
 #define JSON_ERR(err) json_string(SHARE_ERR(err))
 
 /* Needs to be entered with client holding a ref count. */
-static json_t *parse_submit(stratum_instance_t *client, json_t *json_msg,
-			    const json_t *params_val, json_t **err_val,
-			    enum share_err *err_code)
+static json_t *parse_submit(stratum_instance_t *client, const json_t *params_val,
+			    json_t **err_val, enum share_err *err_code)
 {
 	bool share = false, result = false, invalid = true, submit = false, stale = false;
 	const char *workername, *job_id, *ntime, *version_mask;
@@ -7639,7 +7638,7 @@ static void sshare_process(ckpool_t *ckp, json_params_t *jp)
 		goto out_decref;
 	}
 	json_msg = json_object();
-	result_val = parse_submit(client, json_msg, jp->params, &err_val, &err_code);
+	result_val = parse_submit(client, jp->params, &err_val, &err_code);
 	if (err_val) {
 		json_t *err_array = json_array();
 
