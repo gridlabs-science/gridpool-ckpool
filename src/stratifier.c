@@ -6008,7 +6008,8 @@ static void check_best_diff(sdata_t *sdata, user_instance_t *user,worker_instanc
 
 /* Needs to be entered with client holding a ref count. */
 static json_t *parse_submit(stratum_instance_t *client, json_t *json_msg,
-			    const json_t *params_val, json_t **err_val)
+			    const json_t *params_val, json_t **err_val,
+			    enum share_err *err_code)
 {
 	bool share = false, result = false, invalid = true, submit = false, stale = false;
 	const char *workername, *job_id, *ntime, *version_mask;
@@ -6096,8 +6097,12 @@ static json_t *parse_submit(stratum_instance_t *client, json_t *json_msg,
 
 	share = true;
 
-	if (unlikely(!sdata->current_workbase))
+	if (unlikely(!sdata->current_workbase)) {
+		err = SE_NO_WORKBASE;
+		*err_val = JSON_ERR(err);
+		*err_code = err;
 		return json_boolean(false);
+	}
 
 	wb = get_workbase(sdata, id);
 	if (unlikely(!wb)) {
@@ -6322,6 +6327,7 @@ out:
 		LOGINFO("Invalid share from client %s: %s", client->identity, client->workername);
 	}
 	free(fname);
+	*err_code = err;
 	return json_boolean(result);
 }
 
@@ -7610,6 +7616,7 @@ static void steal_json_id(json_t *val, json_params_t *jp)
 static void sshare_process(ckpool_t *ckp, json_params_t *jp)
 {
 	json_t *result_val, *json_msg, *err_val = NULL;
+	enum share_err err_code = SE_NONE;
 	stratum_instance_t *client;
 	sdata_t *sdata = ckp->sdata;
 	int64_t client_id;
@@ -7626,9 +7633,20 @@ static void sshare_process(ckpool_t *ckp, json_params_t *jp)
 		goto out_decref;
 	}
 	json_msg = json_object();
-	result_val = parse_submit(client, json_msg, jp->params, &err_val);
-	json_object_set_new_nocheck(json_msg, "result", result_val);
-	json_object_set_new_nocheck(json_msg, "error", err_val ? err_val : json_null());
+	result_val = parse_submit(client, json_msg, jp->params, &err_val, &err_code);
+	if (err_val) {
+		json_t *err_array = json_array();
+
+		json_decref(result_val);
+		json_object_set_new_nocheck(json_msg, "result", json_null());
+		json_array_append_new(err_array, json_integer(SHARE_ERR_CODE(err_code)));
+		json_array_append_new(err_array, err_val);
+		json_array_append_new(err_array, json_null());
+		json_object_set_new_nocheck(json_msg, "error", err_array);
+	} else {
+		json_object_set_new_nocheck(json_msg, "result", result_val);
+		json_object_set_new_nocheck(json_msg, "error", json_null());
+	}
 	steal_json_id(json_msg, jp);
 	stratum_add_send(sdata, json_msg, client_id, SM_SHARERESULT);
 out_decref:
