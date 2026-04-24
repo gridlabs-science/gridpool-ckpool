@@ -7491,28 +7491,29 @@ static void parse_instance_msg(ckpool_t *ckp, sdata_t *sdata, smsg_t *msg, strat
 	parse_method(ckp, sdata, client, client_id, id_val, method, params);
 }
 
-static void srecv_process(ckpool_t *ckp, json_t *val)
+static void srecv_process(ckpool_t *ckp, json_t *sval)
 {
 	char address[INET6_ADDRSTRLEN], *buf = NULL;
 	bool noid = false, dropped = false;
 	sdata_t *sdata = ckp->sdata;
 	stratum_instance_t *client;
+	json_t * val;
 	smsg_t *msg;
 	int server;
 
-	if (unlikely(!val)) {
-		LOGWARNING("srecv_process received NULL val!");
+	if (unlikely(!sval)) {
+		LOGWARNING("srecv_process received NULL sval!");
 		return;
 	}
 
 	msg = ckzalloc(sizeof(smsg_t));
-	msg->json_msg = val;
+	msg->json_msg = sval;
 	val = json_object_get(msg->json_msg, "client_id");
 	if (unlikely(!val)) {
 		if (ckp->node)
 			parse_node_msg(ckp, sdata, msg->json_msg);
 		else {
-			buf = json_dumps(val, JSON_COMPACT);
+			buf = json_dumps(sval, JSON_COMPACT);
 			LOGWARNING("Failed to extract client_id from connector json smsg %s", buf);
 		}
 		goto out;
@@ -7523,7 +7524,7 @@ static void srecv_process(ckpool_t *ckp, json_t *val)
 
 	val = json_object_get(msg->json_msg, "address");
 	if (unlikely(!val)) {
-		buf = json_dumps(val, JSON_COMPACT);
+		buf = json_dumps(sval, JSON_COMPACT);
 		LOGWARNING("Failed to extract address from connector json smsg %s", buf);
 		goto out;
 	}
@@ -7532,7 +7533,7 @@ static void srecv_process(ckpool_t *ckp, json_t *val)
 
 	val = json_object_get(msg->json_msg, "server");
 	if (unlikely(!val)) {
-		buf = json_dumps(val, JSON_COMPACT);
+		buf = json_dumps(sval, JSON_COMPACT);
 		LOGWARNING("Failed to extract server from connector json smsg %s", buf);
 		goto out;
 	}
