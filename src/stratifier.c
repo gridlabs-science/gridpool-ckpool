@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2020,2023,2025 Con Kolivas
+ * Copyright 2014-2020,2023,2025-2026 Con Kolivas
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free
@@ -649,7 +649,6 @@ static void generate_coinbase(ckpool_t *ckp, workbase_t *wb)
 	if (!ckp->btcsolo) {
 		int coinbase_len, offset = 0;
 		char *coinbase, *cb;
-		json_t *val = NULL;
 
 		/* Append the generation address and coinb3 in !solo mode */
 		wb->coinb2bin[wb->coinb2len++] = sdata->txnlen;
@@ -662,6 +661,8 @@ static void generate_coinbase(ckpool_t *ckp, workbase_t *wb)
 
 		/* Set this only once */
 		if (unlikely(!ckp->coinbase_valid)) {
+			char *cbstr;
+
 			/* We have enough to test the validity of the coinbase here */
 			coinbase_len = wb->coinb1len + ckp->nonce1length + ckp->nonce2length + wb->coinb2len;
 			coinbase = ckzalloc(coinbase_len);
@@ -674,13 +675,11 @@ static void generate_coinbase(ckpool_t *ckp, workbase_t *wb)
 			cb = bin2hex(coinbase, offset);
 			LOGDEBUG("Coinbase txn %s", cb);
 			free(coinbase);
-			if (generator_checktxn(ckp, cb, &val)) {
-				char *s = json_dumps(val, JSON_NO_UTF8 | JSON_COMPACT);
-
-				json_decref(val);
+			cbstr = generator_checktxn(ckp, cb);
+			if (cbstr) {
 				LOGNOTICE("Coinbase transaction confirmed valid");
-				LOGDEBUG("%s", s);
-				free(s);
+				LOGDEBUG("%s", cbstr);
+				free(cbstr);
 			} else {
 				/* This is a fatal error */
 				LOGEMERG("Coinbase failed valid transaction check, aborting!");
@@ -696,7 +695,7 @@ static void generate_coinbase(ckpool_t *ckp, workbase_t *wb)
 		/* Create a sample coinbase to test its validity in solo mode */
 		int coinbase_len, offset = 0;
 		char *coinbase, *cb;
-		json_t *val = NULL;
+		char *cbstr;
 
 		coinbase_len = wb->coinb1len + ckp->nonce1length + ckp->nonce2length + wb->coinb2len +
 			       sdata->txnlen + wb->coinb3len + 1;
@@ -715,13 +714,11 @@ static void generate_coinbase(ckpool_t *ckp, workbase_t *wb)
 		cb = bin2hex(coinbase, offset);
 		LOGDEBUG("Coinbase txn %s", cb);
 		free(coinbase);
-		if (generator_checktxn(ckp, cb, &val)) {
-			char *s = json_dumps(val, JSON_NO_UTF8 | JSON_COMPACT);
-
-			json_decref(val);
+		cbstr = generator_checktxn(ckp, cb);
+		if (cbstr) {
 			LOGNOTICE("Coinbase transaction confirmed valid");
-			LOGDEBUG("%s", s);
-			free(s);
+			LOGDEBUG("%s", cbstr);
+			free(cbstr);
 		} else {
 			/* This is a fatal error */
 			LOGEMERG("Coinbase failed valid transaction check, aborting!");
@@ -786,8 +783,8 @@ static void clear_workbase(ckpool_t *ckp, workbase_t *wb)
 	free(wb->coinb2);
 	free(wb->coinb3bin);
 	json_decref(wb->merkle_array);
-	if (wb->json)
-		json_decref(wb->json);
+	if (wb->gbtdoc)
+		yyjson_doc_free(wb->gbtdoc);
 	free(wb);
 }
 
@@ -1330,14 +1327,14 @@ static void update_txns(ckpool_t *ckp, sdata_t *sdata, txntable_t *txns, bool lo
 /* Distill down a set of transactions into an efficient tree arrangement for
  * stratum messages and fast work assembly. */
 static txntable_t *wb_merkle_bin_txns(ckpool_t *ckp, sdata_t *sdata, workbase_t *wb,
-				      json_t *txn_array, bool local)
+				      yyjson_val *txn_array, bool local)
 {
 	int i, j, binleft, binlen;
 	txntable_t *txns = NULL;
-	json_t *arr_val;
+	yyjson_val *arr_val;
 	uchar *hashbin;
 
-	wb->txns = json_array_size(txn_array);
+	wb->txns = yyjson_arr_size(txn_array);
 	wb->merkles = 0;
 	binlen = wb->txns * 32 + 32;
 	hashbin = alloca(binlen + 32);
@@ -1348,8 +1345,8 @@ static txntable_t *wb_merkle_bin_txns(ckpool_t *ckp, sdata_t *sdata, workbase_t 
 		const char *txn;
 
 		for (i = 0; i < wb->txns; i++) {
-			arr_val = json_array_get(txn_array, i);
-			txn = json_string_value(json_object_get(arr_val, "data"));
+			arr_val = yyjson_arr_get(txn_array, i);
+			txn = yyjson_get_str(yyjson_obj_get(arr_val, "data"));
 			if (!txn) {
 				LOGWARNING("json_string_value fail - cannot find transaction data");
 				goto out;
@@ -1365,18 +1362,18 @@ static txntable_t *wb_merkle_bin_txns(ckpool_t *ckp, sdata_t *sdata, workbase_t 
 			const char *txid, *hash;
 			char binswap[32];
 
-			arr_val = json_array_get(txn_array, i);
+			arr_val = yyjson_arr_get(txn_array, i);
 
 			// Post-segwit, txid returns the tx hash without witness data
-			txid = json_string_value(json_object_get(arr_val, "txid"));
-			hash = json_string_value(json_object_get(arr_val, "hash"));
+			txid = yyjson_get_str(yyjson_obj_get(arr_val, "txid"));
+			hash = yyjson_get_str(yyjson_obj_get(arr_val, "hash"));
 			if (!txid)
 				txid = hash;
 			if (unlikely(!txid)) {
 				LOGERR("Missing txid for transaction in wb_merkle_bins");
 				goto out;
 			}
-			txn = json_string_value(json_object_get(arr_val, "data"));
+			txn = yyjson_get_str(yyjson_obj_get(arr_val, "data"));
 			add_txn(ckp, sdata, &txns, hash, txn, local);
 			len = strlen(txn);
 			memcpy(wb->txn_data + ofs, txn, len);
@@ -1417,16 +1414,35 @@ out:
 	return txns;
 }
 
+/* Wrapper for functions still using jansson txn arrays */
+static txntable_t *wb_merkle_bin_jtxns(ckpool_t *ckp, sdata_t *sdata, workbase_t *wb,
+				       json_t *jtxn_array, bool local)
+{
+	txntable_t *ret;
+	yyjson_doc *doc;
+	yyjson_val *root;
+	char *s;
+
+	s = json_dumps(jtxn_array, JSON_NO_UTF8);
+
+	doc = yyjson_read(s, strlen(s), 0);
+	root = yyjson_doc_get_root(doc);
+	ret = wb_merkle_bin_txns(ckp, sdata, wb, root, local);
+	yyjson_doc_free(doc);
+	free(s);
+	return ret;
+}
+
 static const unsigned char witness_nonce[32] = {0};
 static const int witness_nonce_size = sizeof(witness_nonce);
 static const unsigned char witness_header[] = {0xaa, 0x21, 0xa9, 0xed};
 static const int witness_header_size = sizeof(witness_header);
 
-static void gbt_witness_data(workbase_t *wb, json_t *txn_array)
+static void gbt_witness_data(workbase_t *wb, yyjson_val *txn_array)
 {
-	int i, binlen, txncount = json_array_size(txn_array);
+	int i, binlen, txncount = yyjson_arr_size(txn_array);
 	const char* hash;
-	json_t *arr_val;
+	yyjson_val *arr_val;
 	uchar *hashbin;
 
 	binlen = txncount * 32 + 32;
@@ -1436,8 +1452,8 @@ static void gbt_witness_data(workbase_t *wb, json_t *txn_array)
 	for (i = 0; i < txncount; i++) {
 		char binswap[32];
 
-		arr_val = json_array_get(txn_array, i);
-		hash = json_string_value(json_object_get(arr_val, "hash"));
+		arr_val = yyjson_arr_get(txn_array, i);
+		hash = yyjson_get_str(yyjson_obj_get(arr_val, "hash"));
 		if (unlikely(!hash)) {
 			LOGERR("Hash missing for transaction");
 			return;
@@ -1478,7 +1494,7 @@ static void block_update(ckpool_t *ckp, int *prio)
 	bool new_block = false, ret = false;
 	const char *witnessdata_check;
 	sdata_t *sdata = ckp->sdata;
-	json_t *txn_array;
+	yyjson_val *txn_array;
 	txntable_t *txns;
 	int retries = 0;
 	workbase_t *wb;
@@ -1498,12 +1514,12 @@ retry:
 
 	wb->ckp = ckp;
 
-	txn_array = json_object_get(wb->json, "transactions");
+	txn_array = yyjson_obj_get(wb->gbtroot, "transactions");
 	txns = wb_merkle_bin_txns(ckp, sdata, wb, txn_array, true);
 
 	wb->insert_witness = false;
 
-	witnessdata_check = json_string_value(json_object_get(wb->json, "default_witness_commitment"));
+	witnessdata_check = yyjson_get_str(yyjson_obj_get(wb->gbtroot, "default_witness_commitment"));
 	if (likely(witnessdata_check)) {
 		LOGDEBUG("Default witness commitment present, adding witness data");
 		gbt_witness_data(wb, txn_array);
@@ -1695,7 +1711,7 @@ static bool rebuild_txns(ckpool_t *ckp, sdata_t *sdata, workbase_t *wb)
 		/* These two structures are regenerated so free their ram */
 		json_decref(wb->merkle_array);
 		dealloc(wb->txn_hashes);
-		txns = wb_merkle_bin_txns(ckp, sdata, wb, txn_array, false);
+		txns = wb_merkle_bin_jtxns(ckp, sdata, wb, txn_array, false);
 		if (likely(txns))
 			update_txns(ckp, sdata, txns, false);
 	} else {

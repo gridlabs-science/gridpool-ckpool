@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2017,2023 Con Kolivas
+ * Copyright 2014-2017,2023,2026 Con Kolivas
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free
@@ -440,7 +440,7 @@ retry:
 			send_unix_msg(umsg->sockd, "Failed");
 			goto reconnect;
 		} else {
-			char *s = json_dumps(gbt.json, JSON_NO_UTF8);
+			char *s = yyjson_write(gbt.gbtdoc, 0, NULL);
 
 			send_unix_msg(umsg->sockd, s);
 			free(s);
@@ -930,11 +930,13 @@ out:
 	return ret;
 }
 
-bool generator_checktxn(const ckpool_t *ckp, const char *txn, json_t **val)
+char *generator_checktxn(const ckpool_t *ckp, const char *txn)
 {
+	yyjson_doc *doc;
+	yyjson_val *root;
 	gdata_t *gdata = ckp->gdata;
 	server_instance_t *si;
-	bool ret = false;
+	char *ret = NULL;
 	connsock_t *cs;
 
 	si = gdata->current_si;
@@ -943,9 +945,20 @@ bool generator_checktxn(const ckpool_t *ckp, const char *txn, json_t **val)
 		goto out;
 	}
 	cs = &si->cs;
-	*val = validate_txn(cs, txn);
-	if (*val)
-		ret = true;
+	doc = validate_txn(cs, txn);
+	if (!doc) {
+		LOGWARNING("Invalid response to generator_checkaddr");
+		goto out;
+	}
+	root = yyjson_doc_get_root(doc);
+	if (unlikely(!root)) {
+		LOGERR("Failed to get json root in response to generator_checkaddr");
+		goto out;
+	}
+	if (likely(yyjson_is_str(root)))
+		ret = strdup(yyjson_get_str(root));
+	else
+		LOGERR("Response to generator_checkaddr not a string");
 out:
 	return ret;
 }
