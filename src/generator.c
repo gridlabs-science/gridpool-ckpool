@@ -955,10 +955,7 @@ char *generator_checktxn(const ckpool_t *ckp, const char *txn)
 		LOGERR("Failed to get json root in response to generator_checkaddr");
 		goto out;
 	}
-	if (likely(yyjson_is_str(root)))
-		ret = strdup(yyjson_get_str(root));
-	else
-		LOGERR("Response to generator_checkaddr not a string");
+	ret = yyjson_write(doc, 0, NULL);
 out:
 	return ret;
 }
