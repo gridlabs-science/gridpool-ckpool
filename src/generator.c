@@ -933,7 +933,6 @@ out:
 char *generator_checktxn(const ckpool_t *ckp, const char *txn)
 {
 	yyjson_doc *doc;
-	yyjson_val *root;
 	gdata_t *gdata = ckp->gdata;
 	server_instance_t *si;
 	char *ret = NULL;
@@ -950,12 +949,8 @@ char *generator_checktxn(const ckpool_t *ckp, const char *txn)
 		LOGWARNING("Invalid response to generator_checkaddr");
 		goto out;
 	}
-	root = yyjson_doc_get_root(doc);
-	if (unlikely(!root)) {
-		LOGERR("Failed to get json root in response to generator_checkaddr");
-		goto out;
-	}
 	ret = yyjson_write(doc, 0, NULL);
+	yyjson_doc_free(doc);
 out:
 	return ret;
 }
