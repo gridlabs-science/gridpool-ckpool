@@ -1756,7 +1756,7 @@ int main(int argc, char **argv)
 
 	/* Donations on testnet are meaningless but required for complete
 	 * testing. Testnet and regtest addresses */
-	ckp.tndonaddress = "tb1q5fyv7tue73y4zxezh2c685qpwx0cfngfxlrgxh";
+	ckp.tndonaddress = "tb1qdxclx2qxdh0g67j27v6y6ls0xm9cl2w2xktjq2";
 	ckp.rtdonaddress = "bcrt1qlk935ze2fsu86zjp395uvtegztrkaezawxx0wf";
 
 	if (!ckp.btcaddress && !ckp.btcsolo && !ckp.proxy)
