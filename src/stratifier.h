@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2017,2023 Con Kolivas
+ * Copyright 2014-2017,2023,2026 Con Kolivas
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free
@@ -85,7 +85,8 @@ struct genwork {
 
 	bool incomplete; /* This is a remote workinfo without all the txn data */
 
-	json_t *json; /* getblocktemplate json */
+	yyjson_doc *gbtdoc; /* getblocktemplate json */
+	yyjson_val *gbtroot;
 };
 
 void parse_remote_txns(ckpool_t *ckp, const json_t *val);
