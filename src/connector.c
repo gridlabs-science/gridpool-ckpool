@@ -1094,13 +1094,14 @@ static void send_client_yyjson(ckpool_t *ckp, cdata_t *cdata, int64_t client_id,
 	char *msg;
 
 	if (ckp->node && (client = ref_client_by_id(cdata, client_id))) {
-		json_t *val = yyjson_to_json(doc);
+		yyjson_mut_doc *tmp_doc = yyjson_mut_doc_mut_copy(doc, NULL);
+		yyjson_mut_val *root = yyjson_mut_doc_get_root(tmp_doc);
 
-		json_object_set_new_nocheck(val, "client_id", json_integer(client_id));
-		json_object_set_new_nocheck(val, "address", json_string(client->address_name));
-		json_object_set_new_nocheck(val, "server", json_integer(client->server));
+		yyjson_mut_obj_add_sint(tmp_doc, root, "client_id", client_id);
+		yyjson_mut_obj_add_str(tmp_doc, root, "address", client->address_name);
+		yyjson_mut_obj_add_sint(tmp_doc, root, "server", client->server);
 		dec_instance_ref(cdata, client);
-		stratifier_add_recv(ckp, val);
+		stratifier_add_yyrecv(ckp, tmp_doc);
 	}
 	msg = yyjson_mut_write(doc, YYJSON_WRITE_NEWLINE_AT_END, NULL);
 	send_client(ckp, cdata, client_id, msg);
