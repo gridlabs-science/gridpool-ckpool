@@ -515,8 +515,8 @@ static void parse_redirector_share(cdata_t *cdata, client_instance_t *client, co
  * true if we will still be receiving messages from this client. */
 static bool parse_client_msg(ckpool_t *ckp, cdata_t *cdata, client_instance_t *client)
 {
+	yyjson_doc *sdoc;
 	int buflen, ret;
-	json_t *val;
 	char *eol;
 
 retry:
@@ -550,39 +550,49 @@ reparse:
 		return false;
 	}
 
-	if (!(val = json_loads(client->buf, JSON_DISABLE_EOF_CHECK, NULL))) {
+	if (!(sdoc = yyjson_read(client->buf, strlen(client->buf), YYJSON_READ_STOP_WHEN_DONE))) {
 		char *buf = strdup("Invalid JSON, disconnecting\n");
 
 		LOGINFO("Client id %"PRId64" sent invalid json message %s", client->id, client->buf);
 		send_client(ckp, cdata, client->id, buf);
 		return false;
 	} else {
+		yyjson_mut_doc *doc = yyjson_doc_mut_copy(sdoc, NULL);
+		yyjson_mut_val *root = yyjson_mut_doc_get_root(doc);
+
+		yyjson_doc_free(sdoc);
+
 		if (client->passthrough) {
 			int64_t passthrough_id;
 
-			json_getdel_int64(&passthrough_id, val, "client_id");
+			passthrough_id = yyjson_mut_get_sint(yyjson_mut_obj_get(root, "client_id"));
 			passthrough_id = (client->id << 32) | passthrough_id;
-			json_object_set_new_nocheck(val, "client_id", json_integer(passthrough_id));
+			yyjson_mut_obj_remove_key(root, "client_id");
+			yyjson_mut_obj_add_sint(doc, root, "client_id", passthrough_id);
 		} else {
-			if (ckp->redirector && !client->redirected && strstr(client->buf, "mining.submit"))
+			if (ckp->redirector && !client->redirected && strstr(client->buf, "mining.submit")) {
+				json_t *val = yyjson_to_json(doc);
+
 				parse_redirector_share(cdata, client, val);
-			json_object_set_new_nocheck(val, "client_id", json_integer(client->id));
-			json_object_set_new_nocheck(val, "address", json_string(client->address_name));
+				json_decref(val);
+			}
+			yyjson_mut_obj_add_sint(doc, root, "client_id", client->id);
+			yyjson_mut_obj_add_str(doc, root, "address", client->address_name);
 		}
-		json_object_set_new_nocheck(val, "server", json_integer(client->server));
+		yyjson_mut_obj_add_sint(doc, root, "server", client->server);
 
 		/* Do not send messages of clients we've already dropped. We
 		 * do this unlocked as the occasional false negative can be
 		 * filtered by the stratifier. */
 		if (likely(!client->invalid)) {
 			if (!ckp->passthrough)
-				stratifier_add_recv(ckp, val);
+				stratifier_add_yyrecv(ckp, doc);
 			if (ckp->node)
-				stratifier_add_recv(ckp, json_deep_copy(val));
+				stratifier_add_recv(ckp, yyjson_to_json(doc));
 			if (ckp->passthrough)
-				generator_add_send(ckp, val);
+				generator_add_send(ckp, yyjson_to_json(doc));
 		} else
-			json_decref(val);
+			yyjson_mut_doc_free(doc);
 	}
 	client->bufofs -= buflen;
 	if (client->bufofs)
