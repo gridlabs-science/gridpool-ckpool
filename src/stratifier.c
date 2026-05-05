@@ -7668,6 +7668,21 @@ void _stratifier_add_recv(ckpool_t *ckp, json_t *val, const char *file, const ch
 	ckmsgq_add(sdata->srecvs, msg);
 }
 
+void _stratifier_add_yyrecv(ckpool_t *ckp, yyjson_mut_doc *doc, const char *file, const char *func, const int line)
+{
+	sdata_t *sdata;
+	smsg_t *msg;
+
+	if (unlikely(!doc)) {
+		LOGWARNING("_stratifier_add_yyrecv received NULL doc from %s %s:%d", file, func, line);
+		return;
+	}
+	sdata = ckp->sdata;
+	msg = ckzalloc(sizeof(smsg_t));
+	msg->doc = doc;
+	ckmsgq_add(sdata->srecvs, msg);
+}
+
 static void ssend_process(ckpool_t *ckp, smsg_t *msg)
 {
 	if (unlikely(!msg->json_msg && !msg->doc)) {
