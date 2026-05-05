@@ -7575,10 +7575,10 @@ static void srecv_process(ckpool_t *ckp, smsg_t *msg)
 {
 	char address[INET6_ADDRSTRLEN], *buf = NULL;
 	bool noid = false, dropped = false;
-	yyjson_mut_doc *sdoc = msg->doc;
+	yyjson_mut_doc *doc = msg->doc;
+	yyjson_mut_val *root, *val;
 	sdata_t *sdata = ckp->sdata;
 	stratum_instance_t *client;
-	json_t *val, *sval;
 	int server;
 
 	if (unlikely(!msg)) {
@@ -7587,42 +7587,41 @@ static void srecv_process(ckpool_t *ckp, smsg_t *msg)
 	}
 
 	/* Temporary cludge to receive yyjson */
-	if (sdoc)
-		msg->json_msg = sval = yyjson_to_json(sdoc);
-	else
-		sval = msg->json_msg;
+	if (!doc)
+		doc = msg->doc = json_to_yyjson(msg->json_msg);
+	root = yyjson_mut_doc_get_root(doc);
 
-	val = json_object_get(msg->json_msg, "client_id");
+	val = yyjson_mut_obj_get(root, "client_id");
 	if (unlikely(!val)) {
 		if (ckp->node)
 			parse_node_msg(ckp, sdata, msg->json_msg);
 		else {
-			buf = json_dumps(sval, JSON_COMPACT);
+			buf = yyjson_mut_write(doc, 0, NULL);
 			LOGWARNING("Failed to extract client_id from connector json smsg %s", buf);
 		}
 		goto out;
 	}
 
-	msg->client_id = json_integer_value(val);
-	json_object_clear(val);
+	msg->client_id = yyjson_mut_get_int(val);
+	yyjson_mut_obj_clear(val);
 
-	val = json_object_get(msg->json_msg, "address");
+	val = yyjson_mut_obj_get(root, "address");
 	if (unlikely(!val)) {
-		buf = json_dumps(sval, JSON_COMPACT);
+		buf = yyjson_mut_write(doc, 0, NULL);
 		LOGWARNING("Failed to extract address from connector json smsg %s", buf);
 		goto out;
 	}
-	strcpy(address, json_string_value(val));
-	json_object_clear(val);
+	strcpy(address, yyjson_mut_get_str(val));
+	yyjson_mut_obj_clear(val);
 
-	val = json_object_get(msg->json_msg, "server");
+	val = yyjson_mut_obj_get(root, "server");
 	if (unlikely(!val)) {
-		buf = json_dumps(sval, JSON_COMPACT);
+		buf = yyjson_mut_write(doc, 0, NULL);
 		LOGWARNING("Failed to extract server from connector json smsg %s", buf);
 		goto out;
 	}
-	server = json_integer_value(val);
-	json_object_clear(val);
+	server = yyjson_mut_get_sint(val);
+	yyjson_mut_obj_clear(val);
 
 	/* Parse the message here */
 	ck_wlock(&sdata->instance_lock);
@@ -7646,6 +7645,9 @@ static void srecv_process(ckpool_t *ckp, smsg_t *msg)
 	}
 	if (unlikely(noid))
 		LOGINFO("Stratifier added instance %s server %d", client->identity, server);
+
+	if (!msg->json_msg)
+		msg->json_msg = yyjson_to_json(doc);
 
 	if (client->trusted)
 		parse_trusted_msg(ckp, sdata, msg->json_msg, client);
