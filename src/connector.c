@@ -1090,9 +1090,18 @@ static void send_client_json(ckpool_t *ckp, cdata_t *cdata, int64_t client_id, j
 
 static void send_client_yyjson(ckpool_t *ckp, cdata_t *cdata, int64_t client_id, yyjson_mut_doc *doc)
 {
+	client_instance_t *client;
 	char *msg;
 
-	/* FIXME no node or passthrough support */
+	if (ckp->node && (client = ref_client_by_id(cdata, client_id))) {
+		json_t *val = yyjson_to_json(doc);
+
+		json_object_set_new_nocheck(val, "client_id", json_integer(client_id));
+		json_object_set_new_nocheck(val, "address", json_string(client->address_name));
+		json_object_set_new_nocheck(val, "server", json_integer(client->server));
+		dec_instance_ref(cdata, client);
+		stratifier_add_recv(ckp, val);
+	}
 	msg = yyjson_mut_write(doc, YYJSON_WRITE_NEWLINE_AT_END, NULL);
 	send_client(ckp, cdata, client_id, msg);
 	yyjson_mut_doc_free(doc);
