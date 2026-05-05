@@ -165,3 +165,26 @@ yyjson_mut_doc *yyjson_mut_pack(const char *fmt, ...)
 	yyjson_mut_doc_set_root(doc, root);
 	return doc;
 }
+
+yyjson_mut_val *yyjson_mut_pack_val(yyjson_mut_doc *doc, const char *fmt, ...)
+{
+	if (!doc || !fmt || !*fmt)
+		return NULL;
+
+	va_list ap;
+	va_start(ap, fmt);
+
+	const char *p = fmt;
+	yyjson_mut_val *val = yyjson_mut_pack_value(doc, &p, &ap);
+
+	va_end(ap);
+
+	if (!val)
+		return NULL;
+
+	yyjson_mut_pack_skip(&p);
+	if (*p != '\0')
+		return NULL;
+
+	return val;
+}

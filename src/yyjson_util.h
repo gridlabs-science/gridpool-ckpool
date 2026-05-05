@@ -8,3 +8,4 @@
  */
 
 yyjson_mut_doc *yyjson_mut_pack(const char *fmt, ...);
+yyjson_mut_val *yyjson_mut_pack_val(yyjson_mut_doc *doc, const char *fmt, ...);
