@@ -1,5 +1,5 @@
 /*
- * Copyright Con Kolivas
+ * Copyright Con Kolivas 2026
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free
@@ -9,6 +9,7 @@
 
 #include "yyjson.h"
 #include <stdarg.h>
+#include <jansson.h>
 
 static void yyjson_mut_pack_skip(const char **pp)
 {
@@ -187,4 +188,28 @@ yyjson_mut_val *yyjson_mut_pack_val(yyjson_mut_doc *doc, const char *fmt, ...)
 		return NULL;
 
 	return val;
+}
+
+/* Braindead incredibly inefficient conversion to from jansson/yyjson. */
+yyjson_mut_doc *json_to_yyjson(json_t *json)
+{
+	char *s = json_dumps(json, JSON_NO_UTF8);
+	yyjson_mut_doc *mut_doc;
+	yyjson_doc *doc;
+
+	doc = yyjson_read(s, strlen(s), 0);
+	free(s);
+	mut_doc = yyjson_doc_mut_copy(doc, NULL);
+	yyjson_doc_free(doc);
+	return mut_doc;
+}
+
+json_t *yyjson_to_json(yyjson_mut_doc *doc)
+{
+	char *s = yyjson_mut_write(doc, 0, NULL);
+	json_t *json;
+
+	json = json_loads(s, 0, NULL);
+	free(s);
+	return json;
 }
