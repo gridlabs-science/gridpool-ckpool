@@ -6525,6 +6525,30 @@ static void stratum_broadcast_updates(sdata_t *sdata, bool clean)
 	ck_wunlock(&sdata->instance_lock);
 }
 
+static void send_yyjson_err(sdata_t *sdata, const int64_t client_id, yyjson_mut_doc *sdoc,
+			    yyjson_mut_val *id_val, const char *err_msg)
+{
+	yyjson_mut_doc *doc;
+
+	/* Some clients have no id_val so pass back an empty string. */
+	if (unlikely(!id_val))
+		doc = yyjson_mut_pack("{ssss}", "id", "", "error", err_msg);
+	else {
+		yyjson_mut_doc *tmpdoc;
+		yyjson_mut_val *val, *root, *tmproot;
+
+		doc = yyjson_mut_doc_new(NULL);
+		tmpdoc = yyjson_mut_doc_mut_copy(sdoc, NULL);
+		tmproot = yyjson_mut_doc_get_root(tmpdoc);
+		val = yyjson_mut_val_mut_copy(doc, tmproot);
+
+		root = yyjson_mut_pack_val(doc, "{soss}", "id", val, "error", err_msg);
+		yyjson_mut_doc_set_root(doc, root);
+		yyjson_mut_doc_free(tmpdoc);
+	}
+	stratum_add_yysend(sdata, doc, client_id, SM_ERROR);
+}
+
 static void send_json_err(sdata_t *sdata, const int64_t client_id, json_t *id_val, const char *err_msg)
 {
 	json_t *val;
