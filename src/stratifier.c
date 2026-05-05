@@ -3535,7 +3535,7 @@ static void stratum_broadcast(sdata_t *sdata, json_t *val, const int msg_type)
 		msg = ckzalloc(sizeof(smsg_t));
 		if (subclient(client->id))
 			json_set_string(val, "node.method", stratum_msgs[msg_type]);
-		msg->json_msg = json_deep_copy(val);
+		msg->doc = json_to_yyjson(val);
 		msg->client_id = client->id;
 		client_msg->data = msg;
 		DL_APPEND(bulk_send, client_msg);
@@ -3544,6 +3544,65 @@ static void stratum_broadcast(sdata_t *sdata, json_t *val, const int msg_type)
 	ck_runlock(&ckp_sdata->instance_lock);
 
 	json_decref(val);
+
+	if (likely(bulk_send))
+		ssend_bulk_append(sdata, bulk_send, messages);
+}
+
+static void stratum_yybroadcast(sdata_t *sdata, yyjson_mut_doc *doc, const int msg_type)
+{
+	ckpool_t *ckp = sdata->ckp;
+	sdata_t *ckp_sdata = ckp->sdata;
+	stratum_instance_t *client, *tmp;
+	ckmsg_t *bulk_send = NULL;
+	yyjson_mut_val *root;
+	int messages = 0;
+
+	if (unlikely(!doc)) {
+		LOGERR("Sent null json to stratum_yybroadcast");
+		return;
+	}
+
+	if (ckp->node) {
+		yyjson_mut_doc_free(doc);
+		return;
+	}
+
+	root = yyjson_mut_doc_get_root(doc);
+	if (unlikely(!root)) {
+		LOGERR("Failed to get root in stratum_yybroadcast");
+		yyjson_mut_doc_free(doc);
+		return;
+	}
+
+	ck_rlock(&ckp_sdata->instance_lock);
+	HASH_ITER(hh, ckp_sdata->stratum_instances, client, tmp) {
+		ckmsg_t *client_msg;
+		smsg_t *msg;
+
+		if (sdata != ckp_sdata && client->sdata != sdata)
+			continue;
+
+		if (!client_active(client) || remote_server(client))
+			continue;
+
+		/* Only send messages to whitelisted clients */
+		if (msg_type == SM_MSG && !client->messages)
+			continue;
+
+		client_msg = ckalloc(sizeof(ckmsg_t));
+		msg = ckzalloc(sizeof(smsg_t));
+		if (subclient(client->id))
+			yyjson_mut_obj_add_str(doc, root, "node.method", stratum_msgs[msg_type]);
+		msg->doc = yyjson_mut_doc_mut_copy(doc, NULL);
+		msg->client_id = client->id;
+		client_msg->data = msg;
+		DL_APPEND(bulk_send, client_msg);
+		messages++;
+	}
+	ck_runlock(&ckp_sdata->instance_lock);
+
+	yyjson_mut_doc_free(doc);
 
 	if (likely(bulk_send))
 		ssend_bulk_append(sdata, bulk_send, messages);
