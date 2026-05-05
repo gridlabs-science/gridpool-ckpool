@@ -3498,58 +3498,7 @@ static void connector_test_client(ckpool_t *ckp, const int64_t id)
 /* For creating a list of sends without locking that can then be concatenated
  * to the stratum_sends list. Minimises locking and avoids taking recursive
  * locks. Sends only to sdata bound clients (everyone in ckpool) */
-static void stratum_broadcast(sdata_t *sdata, json_t *val, const int msg_type)
-{
-	ckpool_t *ckp = sdata->ckp;
-	sdata_t *ckp_sdata = ckp->sdata;
-	stratum_instance_t *client, *tmp;
-	ckmsg_t *bulk_send = NULL;
-	int messages = 0;
-
-	if (unlikely(!val)) {
-		LOGERR("Sent null json to stratum_broadcast");
-		return;
-	}
-
-	if (ckp->node) {
-		json_decref(val);
-		return;
-	}
-
-	ck_rlock(&ckp_sdata->instance_lock);
-	HASH_ITER(hh, ckp_sdata->stratum_instances, client, tmp) {
-		ckmsg_t *client_msg;
-		smsg_t *msg;
-
-		if (sdata != ckp_sdata && client->sdata != sdata)
-			continue;
-
-		if (!client_active(client) || remote_server(client))
-			continue;
-
-		/* Only send messages to whitelisted clients */
-		if (msg_type == SM_MSG && !client->messages)
-			continue;
-
-		client_msg = ckalloc(sizeof(ckmsg_t));
-		msg = ckzalloc(sizeof(smsg_t));
-		if (subclient(client->id))
-			json_set_string(val, "node.method", stratum_msgs[msg_type]);
-		msg->doc = json_to_yyjson(val);
-		msg->client_id = client->id;
-		client_msg->data = msg;
-		DL_APPEND(bulk_send, client_msg);
-		messages++;
-	}
-	ck_runlock(&ckp_sdata->instance_lock);
-
-	json_decref(val);
-
-	if (likely(bulk_send))
-		ssend_bulk_append(sdata, bulk_send, messages);
-}
-
-static void stratum_yybroadcast(sdata_t *sdata, yyjson_mut_doc *doc, const int msg_type)
+static void stratum_broadcast(sdata_t *sdata, yyjson_mut_doc *doc, const int msg_type)
 {
 	ckpool_t *ckp = sdata->ckp;
 	sdata_t *ckp_sdata = ckp->sdata;
@@ -3714,11 +3663,11 @@ static void drop_client(ckpool_t *ckp, sdata_t *sdata, const int64_t id)
 
 static void stratum_broadcast_message(sdata_t *sdata, const char *msg)
 {
-	json_t *json_msg;
+	yyjson_mut_doc *doc;
 
-	JSON_CPACK(json_msg, "{sosss[s]}", "id", json_null(), "method", "client.show_message",
-			     "params", msg);
-	stratum_broadcast(sdata, json_msg, SM_MSG);
+	doc = yyjson_mut_pack("{snsss[s]}", "id", "method", "client.show_message",
+			      "params", msg);
+	stratum_broadcast(sdata, doc, SM_MSG);
 }
 
 /* Send a generic reconnect to all clients without parameters to make them
@@ -3727,18 +3676,18 @@ static void request_reconnect(sdata_t *sdata, const char *cmd)
 {
 	char *port = strdupa(cmd), *url = NULL;
 	stratum_instance_t *client, *tmp;
-	json_t *json_msg;
+	yyjson_mut_doc *doc;
 
 	strsep(&port, ":");
 	if (port)
 		url = strsep(&port, ",");
 	if (url && port) {
-		JSON_CPACK(json_msg, "{sosss[ssi]}", "id", json_null(), "method", "client.reconnect",
+		doc = yyjson_mut_pack("{snsss[ssi]}", "id", "method", "client.reconnect",
 			"params", url, port, 0);
 	} else
-		JSON_CPACK(json_msg, "{sosss[]}", "id", json_null(), "method", "client.reconnect",
+		doc = yyjson_mut_pack("{snsss[]}", "id", "method", "client.reconnect",
 		   "params");
-	stratum_broadcast(sdata, json_msg, SM_RECONNECT);
+	stratum_broadcast(sdata, doc, SM_RECONNECT);
 
 	/* Tag all existing clients as dropped now so they can be removed
 	 * lazily */
@@ -3957,14 +3906,11 @@ static void block_reject(json_t *val)
  * a ping at regular intervals */
 static void broadcast_ping(sdata_t *sdata)
 {
-	json_t *json_msg;
+	yyjson_mut_doc *doc;
 
-	JSON_CPACK(json_msg, "{s:[],s:i,s:s}",
-		   "params",
-		   "id", 42,
-		   "method", "mining.ping");
+	doc = yyjson_mut_pack("{s:[],s:i,s:s}", "params", "id", 42, "method", "mining.ping");
 
-	stratum_broadcast(sdata, json_msg, SM_PING);
+	stratum_broadcast(sdata, doc, SM_PING);
 }
 
 static void ckmsgq_stats(ckmsgq_t *ckmsgq, const int size, json_t **val)
@@ -6451,42 +6397,50 @@ out:
 }
 
 /* Must enter with workbase_lock held */
-static json_t *__stratum_notify(const workbase_t *wb, const bool clean)
+static yyjson_mut_doc *__stratum_notify(const workbase_t *wb, const bool clean)
 {
-	json_t *val;
+	yyjson_mut_doc *doc, *merkle_doc;
+	yyjson_mut_val *merkle_root, *merkle_copy, *root;
 
-	JSON_CPACK(val, "{s:[ssssosssb],s:o,s:s}",
-			"params",
-			wb->idstring,
-			wb->prevhash,
-			wb->coinb1,
-			wb->coinb2,
-			json_deep_copy(wb->merkle_array),
-			wb->bbversion,
-			wb->nbit,
-			wb->ntime,
-			clean,
-			"id", json_null(),
-			"method", "mining.notify");
-	return val;
+	doc = yyjson_mut_doc_new(NULL);
+	merkle_doc = yyjson_mut_doc_mut_copy(wb->yymerkle_doc, NULL);
+	merkle_root = yyjson_mut_doc_get_root(merkle_doc);
+	merkle_copy = yyjson_mut_val_mut_copy(doc, merkle_root);
+
+	root = yyjson_mut_pack_val(doc, "{s:[ssssosssb],s:n,s:s}",
+		"params",
+		wb->idstring,
+		wb->prevhash,
+		wb->coinb1,
+		wb->coinb2,
+		merkle_copy,
+		wb->bbversion,
+		wb->nbit,
+		wb->ntime,
+		clean,
+		"id",
+		"method", "mining.notify");
+	yyjson_mut_doc_set_root(doc, root);
+	yyjson_mut_doc_free(merkle_doc);
+	return doc;
 }
 
 static void stratum_broadcast_update(sdata_t *sdata, const workbase_t *wb, const bool clean)
 {
-	json_t *json_msg;
+	yyjson_mut_doc *doc;
 
 	ck_rlock(&sdata->workbase_lock);
-	json_msg = __stratum_notify(wb, clean);
+	doc = __stratum_notify(wb, clean);
 	ck_runlock(&sdata->workbase_lock);
 
-	stratum_broadcast(sdata, json_msg, SM_UPDATE);
+	stratum_broadcast(sdata, doc, SM_UPDATE);
 }
 
 /* For sending a single stratum template update */
 static void stratum_send_update(sdata_t *sdata, const int64_t client_id, const bool clean)
 {
 	ckpool_t *ckp = sdata->ckp;
-	json_t *json_msg;
+	yyjson_mut_doc *doc;
 
 	if (unlikely(!sdata->current_workbase)) {
 		if (!ckp->proxy)
@@ -6497,10 +6451,10 @@ static void stratum_send_update(sdata_t *sdata, const int64_t client_id, const b
 	}
 
 	ck_rlock(&sdata->workbase_lock);
-	json_msg = __stratum_notify(sdata->current_workbase, clean);
+	doc = __stratum_notify(sdata->current_workbase, clean);
 	ck_runlock(&sdata->workbase_lock);
 
-	stratum_add_send(sdata, json_msg, client_id, SM_UPDATE);
+	stratum_add_yysend(sdata, doc, client_id, SM_UPDATE);
 }
 
 /* Hold instance and workbase lock */
@@ -6521,6 +6475,7 @@ static yyjson_mut_doc *__user_notify(const workbase_t *wb, const user_instance_t
 	merkle_doc = yyjson_mut_doc_mut_copy(wb->yymerkle_doc, NULL);
 	merkle_root = yyjson_mut_doc_get_root(merkle_doc);
 	merkle_copy = yyjson_mut_val_mut_copy(doc, merkle_root);
+
 	root = yyjson_mut_pack_val(doc, "{s:[ssssosssb],s:n,s:s}",
 		"params",
 		wb->idstring,
