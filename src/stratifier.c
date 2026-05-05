@@ -6010,7 +6010,7 @@ static void check_best_diff(sdata_t *sdata, user_instance_t *user,worker_instanc
 	}
 	/* Check against pool's best diff unlocked first, then recheck once
 	 * the mutex is locked. */
-	if (best_user && sdiff > sdata->stats.best_diff) {
+	if (sdiff > sdata->stats.best_diff) {
 		/* Don't set pool best diff if it's a block since we will have
 		 * reset it to zero. */
 		mutex_lock(&sdata->stats_lock);
