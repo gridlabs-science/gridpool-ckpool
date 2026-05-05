@@ -7981,9 +7981,9 @@ static void *statsupdate(void *arg)
 		log_entry_t *log_entries = NULL;
 		char_entry_t *char_list = NULL;
 		stratum_instance_t *client;
-		yyjson_mut_doc *pooldoc;
 		user_instance_t *user;
 		char *fname, *s, *sp;
+		yyjson_mut_doc *doc;
 		tv_t now, diff;
 		json_t *val;
 		FILE *fp;
@@ -8048,8 +8048,9 @@ static void *statsupdate(void *arg)
 		user = NULL;
 
 		while ((user = next_user(sdata, user)) != NULL) {
+			yyjson_mut_val *workers_arr;
 			worker_instance_t *worker;
-			json_t *user_array;
+			yyjson_mut_val *root;
 
 			if (!user->authorised)
 				continue;
@@ -8081,18 +8082,19 @@ static void *statsupdate(void *arg)
 			ghs = user->dsps10080 * nonces;
 			suffix_string(ghs, suffix10080, 16, 0);
 
-			JSON_CPACK(val, "{ss,ss,ss,ss,ss,si,si,sI,sf,sI, sI}",
-					"hashrate1m", suffix1,
-					"hashrate5m", suffix5,
-					"hashrate1hr", suffix60,
-					"hashrate1d", suffix1440,
-					"hashrate7d", suffix10080,
-				        "lastshare", user->last_share.tv_sec,
-					"workers", user->workers + user->remote_workers,
-					"shares", user->shares,
-					"bestshare", user->best_diff,
-					"bestever", user->best_ever,
-					"authorised", user->auth_time);
+			doc = yyjson_mut_pack("{ss,ss,ss,ss,ss,si,si,sI,sf,sI,sI}",
+				"hashrate1m", suffix1,
+				"hashrate5m", suffix5,
+				"hashrate1hr", suffix60,
+				"hashrate1d", suffix1440,
+				"hashrate7d", suffix10080,
+			        "lastshare", user->last_share.tv_sec,
+				"workers", user->workers + user->remote_workers,
+				"shares", user->shares,
+				"bestshare", user->best_diff,
+				"bestever", user->best_ever,
+				"authorised", user->auth_time);
+			root = yyjson_mut_doc_get_root(doc);
 
 			if (user->remote_workers) {
 				remote_workers += user->remote_workers;
@@ -8104,17 +8106,19 @@ static void *statsupdate(void *arg)
 					remote_users++;
 			}
 
-			s = json_dumps(val, JSON_NO_UTF8 | JSON_PRESERVE_ORDER | JSON_COMPACT);
+			s = yyjson_mut_write(doc, 0, NULL);
 			ASPRINTF(&sp, "User %s:%s", user->username, s);
 			dealloc(s);
 			add_msg_entry(&char_list, &sp);
 
-			user_array = json_array();
 			worker = NULL;
+
+			workers_arr = yyjson_mut_arr(doc);
+			yyjson_mut_obj_add(root, yyjson_mut_strcpy(doc, "workers"), workers_arr);
 
 			/* Decay times per worker */
 			while ((worker = next_worker(sdata, user, worker)) != NULL) {
-				json_t *wval;
+				yyjson_mut_val *wval;
 
 				per_tdiff = tvdiff(&now, &worker->last_share);
 				if (per_tdiff > 60) {
@@ -8144,26 +8148,24 @@ static void *statsupdate(void *arg)
 
 				LOGDEBUG("Storing worker %s", worker->workername);
 
-				JSON_CPACK(wval, "{ss,ss,ss,ss,ss,ss,si,sI,sf,sI}",
-						"workername", worker->workername,
-						"hashrate1m", suffix1,
-						"hashrate5m", suffix5,
-						"hashrate1hr", suffix60,
-						"hashrate1d", suffix1440,
-						"hashrate7d", suffix10080,
-					        "lastshare", worker->last_share.tv_sec,
-						"shares", worker->shares,
-						"bestshare", worker->best_diff,
-						"bestever", worker->best_ever);
-				json_array_append_new(user_array, wval);
+				wval = yyjson_mut_pack_val(doc, "{ss,ss,ss,ss,ss,ss,si,sI,sf,sI}",
+					"workername", worker->workername,
+					"hashrate1m", suffix1,
+					"hashrate5m", suffix5,
+					"hashrate1hr", suffix60,
+					"hashrate1d", suffix1440,
+					"hashrate7d", suffix10080,
+				        "lastshare", worker->last_share.tv_sec,
+					"shares", worker->shares,
+					"bestshare", worker->best_diff,
+					"bestever", worker->best_ever);
+				yyjson_mut_arr_append(workers_arr, wval);
 			}
 
-			json_object_set_new_nocheck(val, "worker", user_array);
 			ASPRINTF(&fname, "%s/users/%s", ckp->logdir, user->username);
-			s = json_dumps(val, JSON_NO_UTF8 | JSON_PRESERVE_ORDER | JSON_EOL |
-				JSON_REAL_PRECISION(16) | JSON_INDENT(1));
+			s = yyjson_mut_write(doc, YYJSON_WRITE_PRETTY | YYJSON_WRITE_NEWLINE_AT_END, NULL);
 			add_log_entry(&log_entries, &fname, &s);
-			json_decref(val);
+			yyjson_mut_doc_free(doc);
 			if (ckp->remote)
 				upstream_workers(ckp, user);
 		}
@@ -8209,20 +8211,20 @@ static void *statsupdate(void *arg)
 		}
 		dealloc(fname);
 
-		pooldoc = yyjson_mut_pack("{si,si,si,si,si,si}",
+		doc = yyjson_mut_pack("{si,si,si,si,si,si}",
 			"runtime", diff.tv_sec,
 			"lastupdate", now.tv_sec,
 			"Users", stats->users + stats->remote_users,
 			"Workers", stats->workers + stats->remote_workers,
 			"Idle", idle_workers,
 			"Disconnected", stats->disconnected);
-		s = yyjson_mut_write(pooldoc, 0, NULL);
-		yyjson_mut_doc_free(pooldoc);
+		s = yyjson_mut_write(doc, 0, NULL);
+		yyjson_mut_doc_free(doc);
 		LOGNOTICE("Pool:%s", s);
 		fprintf(fp, "%s\n", s);
 		dealloc(s);
 
-		pooldoc = yyjson_mut_pack("{ss,ss,ss,ss,ss,ss,ss}",
+		doc = yyjson_mut_pack("{ss,ss,ss,ss,ss,ss,ss}",
 			"hashrate1m", suffix1,
 			"hashrate5m", suffix5,
 			"hashrate15m", suffix15,
@@ -8230,15 +8232,15 @@ static void *statsupdate(void *arg)
 			"hashrate6hr", suffix360,
 			"hashrate1d", suffix1440,
 			"hashrate7d", suffix10080);
-		s = yyjson_mut_write(pooldoc, YYJSON_WRITE_FP_TO_FIXED(2), NULL);
-		yyjson_mut_doc_free(pooldoc);
+		s = yyjson_mut_write(doc, YYJSON_WRITE_FP_TO_FIXED(2), NULL);
+		yyjson_mut_doc_free(doc);
 		LOGNOTICE("Pool:%s", s);
 		fprintf(fp, "%s\n", s);
 		dealloc(s);
 
 		/* Round to 4 significant digits */
 		percent = round(stats->accounted_diff_shares * 10000 / stats->network_diff) / 100;
-		pooldoc = yyjson_mut_pack("{sf,sI,sI,sI,sf,sf,sf,sf}",
+		doc = yyjson_mut_pack("{sf,sI,sI,sI,sf,sf,sf,sf}",
 		        "diff", percent,
 			"accepted", stats->accounted_diff_shares,
 			"rejected", stats->accounted_rejects,
@@ -8247,8 +8249,8 @@ static void *statsupdate(void *arg)
 			"SPS5m", stats->sps5,
 			"SPS15m", stats->sps15,
 			"SPS1h", stats->sps60);
-		s = yyjson_mut_write(pooldoc, YYJSON_WRITE_FP_TO_FIXED(1), NULL);
-		yyjson_mut_doc_free(pooldoc);
+		s = yyjson_mut_write(doc, YYJSON_WRITE_FP_TO_FIXED(1), NULL);
+		yyjson_mut_doc_free(doc);
 		LOGNOTICE("Pool:%s", s);
 		fprintf(fp, "%s\n", s);
 		dealloc(s);
