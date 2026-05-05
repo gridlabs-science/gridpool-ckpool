@@ -1093,7 +1093,7 @@ static void send_client_yyjson(ckpool_t *ckp, cdata_t *cdata, int64_t client_id,
 	char *msg;
 
 	/* FIXME no node or passthrough support */
-	msg = yyjson_mut_write(doc, 0, NULL);
+	msg = yyjson_mut_write(doc, YYJSON_WRITE_NEWLINE_AT_END, NULL);
 	send_client(ckp, cdata, client_id, msg);
 	yyjson_mut_doc_free(doc);
 }

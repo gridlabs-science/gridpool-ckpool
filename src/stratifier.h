@@ -56,6 +56,7 @@ struct genwork {
 	char merklehash[16][68];
 	char merklebin[16][32];
 	json_t *merkle_array;
+	yyjson_mut_doc *yymerkle_doc;
 
 	/* Template variables, lengths are binary lengths! */
 	char *coinb1; // coinbase1

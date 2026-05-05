@@ -776,6 +776,8 @@ static void clear_workbase(ckpool_t *ckp, workbase_t *wb)
 	free(wb->coinb2);
 	free(wb->coinb3bin);
 	json_decref(wb->merkle_array);
+	if (wb->yymerkle_doc)
+		yyjson_mut_doc_free(wb->yymerkle_doc);
 	if (wb->gbtdoc)
 		yyjson_doc_free(wb->gbtdoc);
 	free(wb);
@@ -1325,6 +1327,7 @@ static txntable_t *wb_merkle_bin_txns(ckpool_t *ckp, sdata_t *sdata, workbase_t 
 	int i, j, binleft, binlen;
 	txntable_t *txns = NULL;
 	yyjson_val *arr_val;
+	yyjson_mut_val *arr;
 	uchar *hashbin;
 
 	wb->txns = yyjson_arr_size(txn_array);
@@ -1381,6 +1384,10 @@ static txntable_t *wb_merkle_bin_txns(ckpool_t *ckp, sdata_t *sdata, workbase_t 
 	} else
 		wb->txn_hashes = ckzalloc(1);
 	wb->merkle_array = json_array();
+	wb->yymerkle_doc = yyjson_mut_doc_new(NULL);
+	arr = yyjson_mut_arr(wb->yymerkle_doc);
+	yyjson_mut_doc_set_root(wb->yymerkle_doc, arr);
+
 	if (binleft > 1) {
 		while (42) {
 			if (binleft == 1)
@@ -1388,6 +1395,7 @@ static txntable_t *wb_merkle_bin_txns(ckpool_t *ckp, sdata_t *sdata, workbase_t 
 			memcpy(&wb->merklebin[wb->merkles][0], hashbin + 32, 32);
 			__bin2hex(&wb->merklehash[wb->merkles][0], &wb->merklebin[wb->merkles][0], 32);
 			json_array_append_new(wb->merkle_array, json_string(&wb->merklehash[wb->merkles][0]));
+			yyjson_mut_arr_add_str(wb->yymerkle_doc, arr, &wb->merklehash[wb->merkles][0]);
 			LOGDEBUG("MerkleHash %d %s",wb->merkles, &wb->merklehash[wb->merkles][0]);
 			wb->merkles++;
 			if (binleft % 2) {
@@ -3578,6 +3586,45 @@ static void stratum_add_send(sdata_t *sdata, json_t *val, const int64_t client_i
 	free(msg);
 }
 
+static void stratum_add_yysend(sdata_t *sdata, yyjson_mut_doc *doc, const int64_t client_id,
+			       const int msg_type)
+{
+	ckpool_t *ckp = sdata->ckp;
+	int64_t remote_id;
+	smsg_t *msg;
+
+	if (ckp->node) {
+		/* Node shouldn't be sending any messages as it only uses the
+		 * stratifier for monitoring activity. */
+		yyjson_mut_doc_free(doc);
+		return;
+	}
+
+	if ((remote_id = subclient(client_id))) {
+		stratum_instance_t *remote = ref_instance_by_id(sdata, remote_id);
+		yyjson_mut_val *root;
+
+		if (unlikely(!remote)) {
+			yyjson_mut_doc_free(doc);
+			return;
+		}
+		root = yyjson_mut_doc_get_root(doc);
+		if (remote->trusted)
+			yyjson_mut_obj_add_str(doc, root, "method", stratum_msgs[msg_type]);
+		else /* Both remote->node and remote->passthrough */
+			yyjson_mut_obj_add_str(doc, root, "node.method", stratum_msgs[msg_type]);
+		dec_instance_ref(sdata, remote);
+	}
+	LOGDEBUG("Sending stratum message %s", stratum_msgs[msg_type]);
+	msg = ckzalloc(sizeof(smsg_t));
+	msg->doc = doc;
+	msg->client_id = client_id;
+	if (likely(ckmsgq_add(sdata->ssends, msg)))
+		return;
+	yyjson_mut_doc_free(doc);
+	free(msg);
+}
+
 static void drop_client(ckpool_t *ckp, sdata_t *sdata, const int64_t id)
 {
 	char_entry_t *entries = NULL;
@@ -5464,14 +5511,14 @@ static void client_auth(ckpool_t *ckp, stratum_instance_t *client, user_instance
 	client->authorising = false;
 }
 
-static json_t *__user_notify(const workbase_t *wb, const user_instance_t *user, const bool clean);
+static yyjson_mut_doc *__user_notify(const workbase_t *wb, const user_instance_t *user, const bool clean);
 
 static void update_solo_client(sdata_t *sdata, workbase_t *wb, const int64_t client_id,
 				 user_instance_t *user_instance)
 {
-	json_t *json_msg = __user_notify(wb, user_instance, true);
+	yyjson_mut_doc *doc = __user_notify(wb, user_instance, true);
 
-	stratum_add_send(sdata, json_msg, client_id, SM_UPDATE);
+	stratum_add_yysend(sdata, doc, client_id, SM_UPDATE);
 }
 
 /* Needs to be entered with client holding a ref count. */
@@ -6398,11 +6445,12 @@ static void stratum_send_update(sdata_t *sdata, const int64_t client_id, const b
 }
 
 /* Hold instance and workbase lock */
-static json_t *__user_notify(const workbase_t *wb, const user_instance_t *user, const bool clean)
+static yyjson_mut_doc *__user_notify(const workbase_t *wb, const user_instance_t *user, const bool clean)
 {
 	int64_t id = wb->id;
 	struct userwb *userwb;
-	json_t *val;
+	yyjson_mut_doc *doc, *merkle_doc;
+	yyjson_mut_val *merkle_root, *merkle_copy, *root;
 
 	HASH_FIND_I64(user->userwbs, &id, userwb);
 	if (unlikely(!userwb)) {
@@ -6410,20 +6458,26 @@ static json_t *__user_notify(const workbase_t *wb, const user_instance_t *user, 
 		return NULL;
 	}
 
-	JSON_CPACK(val, "{s:[ssssosssb],s:o,s:s}",
-			"params",
-			wb->idstring,
-			wb->prevhash,
-			wb->coinb1,
-			userwb->coinb2,
-			json_deep_copy(wb->merkle_array),
-			wb->bbversion,
-			wb->nbit,
-			wb->ntime,
-			clean,
-			"id", json_null(),
-			"method", "mining.notify");
-	return val;
+	doc = yyjson_mut_doc_new(NULL);
+	merkle_doc = yyjson_mut_doc_mut_copy(wb->yymerkle_doc, NULL);
+	merkle_root = yyjson_mut_doc_get_root(merkle_doc);
+	merkle_copy = yyjson_mut_val_mut_copy(doc, merkle_root);
+	root = yyjson_mut_pack_val(doc, "{s:[ssssosssb],s:n,s:s}",
+		"params",
+		wb->idstring,
+		wb->prevhash,
+		wb->coinb1,
+		userwb->coinb2,
+		merkle_copy,
+		wb->bbversion,
+		wb->nbit,
+		wb->ntime,
+		clean,
+		"id",
+		"method", "mining.notify");
+	yyjson_mut_doc_set_root(doc, root);
+	yyjson_mut_doc_free(merkle_doc);
+	return doc;
 }
 
 /* Sends a stratum update with a unique coinb2 for every client. Avoid
@@ -6431,7 +6485,7 @@ static json_t *__user_notify(const workbase_t *wb, const user_instance_t *user, 
 static void stratum_broadcast_updates(sdata_t *sdata, bool clean)
 {
 	stratum_instance_t *client, *tmp;
-	json_t *json_msg;
+	yyjson_mut_doc *doc;
 
 	ck_wlock(&sdata->instance_lock);
 	HASH_ITER(hh, sdata->stratum_instances, client, tmp) {
@@ -6441,11 +6495,11 @@ static void stratum_broadcast_updates(sdata_t *sdata, bool clean)
 		ck_wunlock(&sdata->instance_lock);
 
 		ck_rlock(&sdata->workbase_lock);
-		json_msg = __user_notify(sdata->current_workbase, client->user_instance, clean);
+		doc = __user_notify(sdata->current_workbase, client->user_instance, clean);
 		ck_runlock(&sdata->workbase_lock);
 
-		if (likely(json_msg))
-			stratum_add_send(sdata, json_msg, client->id, SM_UPDATE);
+		if (likely(doc))
+			stratum_add_yysend(sdata, doc, client->id, SM_UPDATE);
 
 		ck_wlock(&sdata->instance_lock);
 		__dec_instance_ref(client);
