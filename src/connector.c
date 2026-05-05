@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2017 Con Kolivas
+ * Copyright 2014-2017,2026 Con Kolivas
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free
@@ -143,8 +143,9 @@ struct connector_data {
 
 	int64_t client_ids;
 
-	/* client message process queue */
+	/* client message process queues */
 	ckmsgq_t *cmpq;
+	ckmsgq_t *cympq;
 
 	/* client message event process queue */
 	ckmsgq_t *cevents;
@@ -1087,6 +1088,16 @@ static void send_client_json(ckpool_t *ckp, cdata_t *cdata, int64_t client_id, j
 	json_decref(json_msg);
 }
 
+static void send_client_yyjson(ckpool_t *ckp, cdata_t *cdata, int64_t client_id, yyjson_mut_doc *doc)
+{
+	char *msg;
+
+	/* FIXME no node or passthrough support */
+	msg = yyjson_mut_write(doc, 0, NULL);
+	send_client(ckp, cdata, client_id, msg);
+	yyjson_mut_doc_free(doc);
+}
+
 /* When testing if a client exists, passthrough clients don't exist when their
  * parent no longer exists. */
 static bool client_exists(cdata_t *cdata, int64_t id)
@@ -1332,11 +1343,47 @@ static void client_message_processor(ckpool_t *ckp, json_t *json_msg)
 	send_client_json(ckp, cdata, client_id, json_msg);
 }
 
+static void client_yymessage_processor(ckpool_t *ckp, yyjson_mut_doc *doc)
+{
+	cdata_t *cdata = ckp->cdata;
+	client_instance_t *client;
+	yyjson_mut_val *root = yyjson_mut_doc_get_root(doc);
+	int64_t client_id;
+
+	/* Extract the client id from the json message and remove its entry */
+	client_id = yyjson_mut_get_int(yyjson_mut_obj_get(root, "client_id"));
+	yyjson_mut_obj_remove_key(root, "client_id");
+	/* Put client_id back in for a passthrough subclient, passing its
+	 * upstream client_id instead of the passthrough's. */
+	if (subclient(client_id))
+		yyjson_mut_obj_add_sint(doc, root, "client_id", client_id & 0xffffffffll);
+
+	/* Flag redirector clients once they've been authorised */
+	if (ckp->redirector && (client = ref_client_by_id(cdata, client_id))) {
+		if (!client->redirected && !client->authorised) {
+			yyjson_mut_val *method_val = yyjson_mut_obj_get(root, "node.method");
+			const char *method = yyjson_mut_get_str(method_val);
+
+			if (!safecmp(method, stratum_msgs[SM_AUTHRESULT]))
+				client->authorised = true;
+		}
+		dec_instance_ref(cdata, client);
+	}
+	send_client_yyjson(ckp, cdata, client_id, doc);
+}
+
 void connector_add_message(ckpool_t *ckp, json_t *val)
 {
 	cdata_t *cdata = ckp->cdata;
 
 	ckmsgq_add(cdata->cmpq, val);
+}
+
+void connector_add_yymessage(ckpool_t *ckp, yyjson_mut_doc *doc)
+{
+	cdata_t *cdata = ckp->cdata;
+
+	ckmsgq_add(cdata->cympq, doc);
 }
 
 /* Send the passthrough the terminate node.method */
@@ -1647,6 +1694,7 @@ void *connector(void *arg)
 		LOGWARNING("Connector successfully bound to socket");
 
 	cdata->cmpq = create_ckmsgq(ckp, "cmpq", &client_message_processor);
+	cdata->cympq = create_ckmsgq(ckp, "cympq", &client_yymessage_processor);
 
 	if (ckp->remote && !setup_upstream(ckp, cdata))
 		goto out;
