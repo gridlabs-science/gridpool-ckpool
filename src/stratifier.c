@@ -7575,17 +7575,23 @@ static void srecv_process(ckpool_t *ckp, smsg_t *msg)
 {
 	char address[INET6_ADDRSTRLEN], *buf = NULL;
 	bool noid = false, dropped = false;
-	json_t *val, *sval = msg->json_msg;
+	yyjson_mut_doc *sdoc = msg->doc;
 	sdata_t *sdata = ckp->sdata;
 	stratum_instance_t *client;
+	json_t *val, *sval;
 	int server;
 
-	if (unlikely(!sval)) {
-		LOGWARNING("srecv_process received NULL sval!");
+	if (unlikely(!msg)) {
+		LOGWARNING("srecv_process received NULL msg!");
 		return;
 	}
 
-	msg->json_msg = sval;
+	/* Temporary cludge to receive yyjson */
+	if (sdoc)
+		msg->json_msg = sval = yyjson_to_json(sdoc);
+	else
+		sval = msg->json_msg;
+
 	val = json_object_get(msg->json_msg, "client_id");
 	if (unlikely(!val)) {
 		if (ckp->node)
