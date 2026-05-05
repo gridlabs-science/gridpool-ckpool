@@ -100,6 +100,7 @@ typedef struct json_params json_params_t;
 
 /* Stratum json messages with their associated client id */
 struct smsg {
+	yyjson_mut_doc *doc;
 	json_t *json_msg;
 	int64_t client_id;
 };
@@ -7596,7 +7597,7 @@ void _stratifier_add_recv(ckpool_t *ckp, json_t *val, const char *file, const ch
 
 static void ssend_process(ckpool_t *ckp, smsg_t *msg)
 {
-	if (unlikely(!msg->json_msg)) {
+	if (unlikely(!msg->json_msg && !msg->doc)) {
 		LOGERR("Sent null json msg to stratum_sender");
 		free(msg);
 		return;
@@ -7604,8 +7605,19 @@ static void ssend_process(ckpool_t *ckp, smsg_t *msg)
 
 	/* Add client_id to the json message and send it to the
 	 * connector process to be delivered */
-	json_object_set_new_nocheck(msg->json_msg, "client_id", json_integer(msg->client_id));
-	connector_add_message(ckp, msg->json_msg);
+	if (msg->doc) {
+		yyjson_mut_doc *doc = msg->doc;
+		yyjson_mut_val *root = yyjson_mut_doc_get_root(doc);
+		/* Working with yyjson */
+
+		yyjson_mut_obj_add_sint(doc, root, "client_id", msg->client_id);
+		connector_add_yymessage(ckp, doc);
+	} else {
+		/* Working with jansson */
+		json_object_set_new_nocheck(msg->json_msg, "client_id", json_integer(msg->client_id));
+		connector_add_message(ckp, msg->json_msg);
+	}
+
 	/* The connector will free msg->json_msg */
 	free(msg);
 }
