@@ -4621,8 +4621,12 @@ retry:
 		json_t *val = json_loads(buf, JSON_DISABLE_EOF_CHECK, NULL);
 
 		/* This is a message for a node */
-		if (likely(val))
-			ckmsgq_add(sdata->srecvs, val);
+		if (likely(val)) {
+			smsg_t *msg = ckzalloc(sizeof(smsg_t));
+
+			msg->json_msg = val;
+			ckmsgq_add(sdata->srecvs, msg);
+		}
 		goto retry;
 	}
 	if (cmdmatch(buf, "ping")) {
@@ -7567,14 +7571,13 @@ static void parse_instance_msg(ckpool_t *ckp, sdata_t *sdata, smsg_t *msg, strat
 	parse_method(ckp, sdata, client, client_id, id_val, method, params);
 }
 
-static void srecv_process(ckpool_t *ckp, json_t *sval)
+static void srecv_process(ckpool_t *ckp, smsg_t *msg)
 {
 	char address[INET6_ADDRSTRLEN], *buf = NULL;
 	bool noid = false, dropped = false;
+	json_t *val, *sval = msg->json_msg;
 	sdata_t *sdata = ckp->sdata;
 	stratum_instance_t *client;
-	json_t * val;
-	smsg_t *msg;
 	int server;
 
 	if (unlikely(!sval)) {
@@ -7582,7 +7585,6 @@ static void srecv_process(ckpool_t *ckp, json_t *sval)
 		return;
 	}
 
-	msg = ckzalloc(sizeof(smsg_t));
 	msg->json_msg = sval;
 	val = json_object_get(msg->json_msg, "client_id");
 	if (unlikely(!val)) {
@@ -7654,13 +7656,16 @@ out:
 void _stratifier_add_recv(ckpool_t *ckp, json_t *val, const char *file, const char *func, const int line)
 {
 	sdata_t *sdata;
+	smsg_t *msg;
 
 	if (unlikely(!val)) {
 		LOGWARNING("_stratifier_add_recv received NULL val from %s %s:%d", file, func, line);
 		return;
 	}
 	sdata = ckp->sdata;
-	ckmsgq_add(sdata->srecvs, val);
+	msg = ckzalloc(sizeof(smsg_t));
+	msg->json_msg = val;
+	ckmsgq_add(sdata->srecvs, msg);
 }
 
 static void ssend_process(ckpool_t *ckp, smsg_t *msg)
