@@ -471,14 +471,6 @@ struct stratifier_data {
 	proxy_t *subproxy; /* Which subproxy this sdata belongs to in proxy mode */
 };
 
-typedef struct json_entry json_entry_t;
-
-struct json_entry {
-	json_entry_t *next;
-	json_entry_t *prev;
-	json_t *val;
-};
-
 /* Priority levels for generator messages */
 #define GEN_LAX 0
 #define GEN_NORMAL 1
