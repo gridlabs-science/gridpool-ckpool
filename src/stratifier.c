@@ -526,8 +526,8 @@ static const int witnessdata_size = 36; // commitment header + hash
 
 static void generate_coinbase(ckpool_t *ckp, workbase_t *wb)
 {
-	uint64_t *u64, g64, d64 = 0;
-	uint32_t *u32;
+	uint64_t u64, g64, d64 = 0;
+	uint32_t u32;
 	sdata_t *sdata = ckp->sdata;
 	char header[272];
 	int len, ofs = 0;
@@ -609,9 +609,9 @@ static void generate_coinbase(ckpool_t *ckp, workbase_t *wb)
 	} else
 		wb->coinb2bin[wb->coinb2len++] = 1 + wb->insert_witness;
 
-	u64 = (uint64_t *)&wb->coinb2bin[wb->coinb2len];
-	*u64 = htole64(g64);
-	wb->coinb2len += 8;
+	u64 = htole64(g64);
+	memcpy(&wb->coinb2bin[wb->coinb2len], &u64, sizeof(uint64_t));
+	wb->coinb2len += sizeof(uint64_t); //8
 
 	/* Coinb2 address goes here, takes up 23~25 bytes + 1 byte for length */
 
@@ -619,9 +619,9 @@ static void generate_coinbase(ckpool_t *ckp, workbase_t *wb)
 	wb->coinb3bin = ckzalloc(256 + wb->insert_witness * (8 + witnessdata_size + 2));
 
 	if (ckp->donvalid && ckp->donation > 0) {
-		u64 = (uint64_t *)wb->coinb3bin;
-		*u64 = htole64(d64);
-		wb->coinb3len += 8;
+		u64 = htole64(d64);
+		memcpy(wb->coinb3bin, &u64, sizeof(uint64_t));
+		wb->coinb3len += sizeof(uint64_t); //8
 
 		wb->coinb3bin[wb->coinb3len++] = sdata->dontxnlen;
 		memcpy(wb->coinb3bin + wb->coinb3len, sdata->dontxnbin, sdata->dontxnlen);
@@ -642,9 +642,9 @@ static void generate_coinbase(ckpool_t *ckp, workbase_t *wb)
 	}
 
 	/* Set nLockTime to block height minus 1 as per BIP 54. */
-	u32 = (uint32_t *)&wb->coinb3bin[wb->coinb3len];
-	*u32 = htole32(wb->height - 1);
-	wb->coinb3len += 4;
+	u32 = htole32(wb->height - 1);
+	memcpy(&wb->coinb3bin[wb->coinb3len], &u32, sizeof(uint32_t));
+	wb->coinb3len += sizeof(uint32_t); //4
 
 	if (!ckp->btcsolo) {
 		int coinbase_len, offset = 0;
