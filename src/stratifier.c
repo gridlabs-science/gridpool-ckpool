@@ -7975,7 +7975,7 @@ static void *statsupdate(void *arg)
 	while (42) {
 		double ghs, ghs1, ghs5, ghs15, ghs60, ghs360, ghs1440, ghs10080,
 			per_tdiff, percent;
-		char suffix1[16], suffix5[16], suffix15[16], suffix60[16], cdfield[64];
+		char suffix1[16], suffix5[16], suffix15[16], suffix60[16];
 		char suffix360[16], suffix1440[16], suffix10080[16];
 		int remote_users = 0, remote_workers = 0, idle_workers = 0;
 		log_entry_t *log_entries = NULL;
@@ -7984,7 +7984,6 @@ static void *statsupdate(void *arg)
 		user_instance_t *user;
 		char *fname, *s, *sp;
 		tv_t now, diff;
-		ts_t ts_now;
 		json_t *val;
 		FILE *fp;
 		int i;
@@ -8301,23 +8300,6 @@ out_status:
 			mutex_unlock(&sdata->proxy_lock);
 			info_msg_entries(&char_list);
 		}
-
-		ts_realtime(&ts_now);
-		sprintf(cdfield, "%lu,%lu", ts_now.tv_sec, ts_now.tv_nsec);
-		JSON_CPACK(val, "{ss,si,si,si,sf,sf,sf,sf,ss,ss,ss,ss}",
-				"poolinstance", ckp->name,
-				"elapsed", diff.tv_sec,
-				"users", stats->users + stats->remote_users,
-				"workers", stats->workers + stats->remote_workers,
-				"hashrate", ghs1,
-				"hashrate5m", ghs5,
-				"hashrate1hr", ghs60,
-				"hashrate24hr", ghs1440,
-				"createdate", cdfield,
-				"createby", "code",
-				"createcode", __func__,
-				"createinet", ckp->serverurl[0]);
-		json_decref(val);
 
 		/* Update stats 32 times per minute to divide up userstats,
 		 * displaying status every minute. */
