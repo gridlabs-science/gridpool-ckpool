@@ -6911,7 +6911,8 @@ static void free_smsg(smsg_t *msg)
 {
 	if (msg->doc)
 		yyjson_mut_doc_free(msg->doc);
-	json_decref(msg->json_msg);
+	if (msg->json_msg)
+		json_decref(msg->json_msg);
 	free(msg);
 }
 
