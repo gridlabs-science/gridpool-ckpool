@@ -7840,8 +7840,9 @@ static void sshare_process(ckpool_t *ckp, json_params_t *jp)
 	doc = yyjson_mut_doc_new(NULL);
 	newid_val = yyjson_mut_val_mut_copy(doc, jp->yyid_val);
 	if (err_code != SE_NONE) {
-		root = yyjson_mut_pack_val(doc, "{sn[isn]so}",
+		root = yyjson_mut_pack_val(doc, "{sns[isn]so}",
 			"result",
+			"error",
 			SHARE_ERR_CODE(err_code),
 			SHARE_ERR(err_code),
 			"id", newid_val);
