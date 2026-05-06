@@ -7097,7 +7097,18 @@ static void parse_remote_shareerr(ckpool_t *ckp, json_t *val, const char *buf)
 }
 
 static void send_auth_response(sdata_t *sdata, const int64_t client_id, const bool ret,
-			       yyjson_mut_val *id_val, yyjson_mut_val *err_val)
+			       json_t *id_val, json_t *err_val)
+{
+	json_t *json_msg = json_object();
+
+	json_object_set_new_nocheck(json_msg, "result", json_boolean(ret));
+	json_object_set_new_nocheck(json_msg, "error", err_val ? err_val : json_null());
+	json_object_set(json_msg, "id", id_val);
+	stratum_add_send(sdata, json_msg, client_id, SM_AUTHRESULT);
+}
+
+static void send_yyauth_response(sdata_t *sdata, const int64_t client_id, const bool ret,
+				 yyjson_mut_val *id_val, yyjson_mut_val *err_val)
 {
 	yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
 	yyjson_mut_val *newid_val, *newerr_val;
@@ -7184,8 +7195,7 @@ void parse_upstream_auth(ckpool_t *ckp, json_t *val)
 		send_auth_success(ckp, sdata, client);
 	else
 		send_auth_failure(sdata, client);
-	/* FIXME missing yyjson conversion */
-	//send_auth_response(sdata, client_id, ret, id_val, err_val);
+	send_auth_response(sdata, client_id, ret, id_val, err_val);
 	client_auth(ckp, client, client->user_instance, ret);
 	dec_instance_ref(sdata, client);
 out:
@@ -7941,7 +7951,7 @@ static void sauth_process(ckpool_t *ckp, json_params_t *jp)
 		err_val = yyjson_mut_null(err_doc);
 	} else
 		err_val = yyjson_mut_doc_get_root(err_doc);
-	send_auth_response(sdata, client_id, ret, jp->yyid_val, err_val);
+	send_yyauth_response(sdata, client_id, ret, jp->yyid_val, err_val);
 	yyjson_mut_doc_free(err_doc);
 	if (!ret)
 		goto out;
