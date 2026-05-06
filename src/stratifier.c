@@ -90,6 +90,11 @@ typedef struct pool_stats pool_stats_t;
 typedef struct genwork workbase_t;
 
 struct json_params {
+	yyjson_mut_doc *doc;
+	yyjson_mut_val *yymethod;
+	yyjson_mut_val *yyparams;
+	yyjson_mut_val *yyid_val;
+
 	json_t *method;
 	json_t *params;
 	json_t *id_val;
@@ -3585,6 +3590,11 @@ static void stratum_add_send(sdata_t *sdata, json_t *val, const int64_t client_i
 		dec_instance_ref(sdata, remote);
 	}
 	LOGDEBUG("Sending stratum message %s", stratum_msgs[msg_type]);
+	if (ckp->loglevel > 5) {
+		char *msg = json_dumps(val, 0);
+		LOGINFO("j %s", msg);
+		free(msg);
+	}
 	msg = ckzalloc(sizeof(smsg_t));
 	msg->json_msg = val;
 	msg->client_id = client_id;
@@ -3594,8 +3604,10 @@ static void stratum_add_send(sdata_t *sdata, json_t *val, const int64_t client_i
 	free(msg);
 }
 
-static void stratum_add_yysend(sdata_t *sdata, yyjson_mut_doc *doc, const int64_t client_id,
-			       const int msg_type)
+static void _stratum_add_yysend(sdata_t *sdata, yyjson_mut_doc *doc, const int64_t client_id,
+			       const int msg_type, const char *file,
+			       const char *func, const int line)
+
 {
 	ckpool_t *ckp = sdata->ckp;
 	int64_t remote_id;
@@ -3623,7 +3635,12 @@ static void stratum_add_yysend(sdata_t *sdata, yyjson_mut_doc *doc, const int64_
 			yyjson_mut_obj_add_str(doc, root, "node.method", stratum_msgs[msg_type]);
 		dec_instance_ref(sdata, remote);
 	}
+
 	LOGDEBUG("Sending stratum message %s", stratum_msgs[msg_type]);
+	if (ckp->loglevel > 5) {
+		char *msg = yyjson_mut_write(doc, 0, NULL);
+			LOGINFO("yyj from %s %s:%d %s", file, func, line, msg); free(msg);
+	}
 	msg = ckzalloc(sizeof(smsg_t));
 	msg->doc = doc;
 	msg->client_id = client_id;
@@ -3632,6 +3649,9 @@ static void stratum_add_yysend(sdata_t *sdata, yyjson_mut_doc *doc, const int64_
 	yyjson_mut_doc_free(doc);
 	free(msg);
 }
+
+#define stratum_add_yysend(sdata, doc, client_id, msg_type) \
+	_stratum_add_yysend(sdata, doc, client_id, msg_type, __FILE__, __func__, __LINE__)
 
 static void drop_client(ckpool_t *ckp, sdata_t *sdata, const int64_t id)
 {
@@ -4981,38 +5001,46 @@ out_unlock:
 	return ret;
 }
 
+/* Create a yyjson_mut_doc with just one string as the only entry */
+static yyjson_mut_doc *yyjson_string(const char *msg)
+{
+	yyjson_mut_doc *doc = yyjson_mut_pack("s", msg);
+	return doc;
+}
+
 /* Extranonce1 must be set here. Needs to be entered with client holding a ref
  * count. */
-static json_t *parse_subscribe(stratum_instance_t *client, const int64_t client_id, const json_t *params_val)
+static yyjson_mut_doc *parse_subscribe(stratum_instance_t *client, const int64_t client_id,
+				       yyjson_mut_val *params_val)
 {
 	ckpool_t *ckp = client->ckp;
 	sdata_t *sdata, *ckp_sdata = ckp->sdata;
 	int session_id = 0, userid = -1;
 	bool old_match = false;
+	yyjson_mut_doc *doc;
 	char sessionid[12];
 	int arr_size;
-	json_t *ret;
 	int n2len;
 
-	if (unlikely(!json_is_array(params_val))) {
+	if (unlikely(!yyjson_mut_is_arr(params_val))) {
 		stratum_send_message(ckp_sdata, client, "Invalid json: params not an array");
-		return json_string("params not an array");
+		return yyjson_string("params not an array");
 	}
 
 	sdata = select_sdata(ckp, ckp_sdata, 0);
 	if (unlikely(!ckp->node && (!sdata || !sdata->current_workbase))) {
 		LOGWARNING("Failed to provide subscription due to no %s", sdata ? "current workbase" : "sdata");
 		stratum_send_message(ckp_sdata, client, "Pool Initialising");
-		return json_string("Initialising");
+		return yyjson_string("Initialising");
 	}
 
-	arr_size = json_array_size(params_val);
+	arr_size = yyjson_mut_arr_size(params_val);
 	/* NOTE useragent is NULL prior to this so should not be used in code
 	 * till after this point */
 	if (arr_size > 0) {
 		const char *buf;
 
-		buf = json_string_value(json_array_get(params_val, 0));
+		buf = yyjson_mut_get_str(yyjson_mut_arr_get(params_val, 0));
 		if (buf && strlen(buf))
 			client->useragent = strdup(buf);
 		else
@@ -5020,7 +5048,7 @@ static json_t *parse_subscribe(stratum_instance_t *client, const int64_t client_
 		if (arr_size > 1) {
 			/* This would be the session id for reconnect, it will
 			 * not work for clients on a proxied connection. */
-			buf = json_string_value(json_array_get(params_val, 1));
+			buf = yyjson_mut_get_str(yyjson_mut_arr_get(params_val, 1));
 			session_id = int_from_sessionid(buf);
 			LOGDEBUG("Found old session id %d", session_id);
 		}
@@ -5072,7 +5100,7 @@ static json_t *parse_subscribe(stratum_instance_t *client, const int64_t client_
 		if (!new_enonce1(ckp, ckp_sdata, sdata, client)) {
 			stratum_send_message(sdata, client, "Pool full of clients");
 			client->reject = 3;
-			return json_string("proxy full");
+			yyjson_string("Proxy full");
 		}
 		LOGINFO("Set new subscription %s to new enonce1 %lx string %s", client->identity,
 			client->enonce1_64, client->enonce1);
@@ -5085,13 +5113,13 @@ static json_t *parse_subscribe(stratum_instance_t *client, const int64_t client_
 	ck_rlock(&sdata->workbase_lock);
 	n2len = sdata->workbases->enonce2varlen;
 	sprintf(sessionid, "%08x", client->session_id);
-	JSON_CPACK(ret, "[[[s,s]],s,i]", "mining.notify", sessionid, client->enonce1,
-			n2len);
+	doc = yyjson_mut_pack("[[[s,s]],s,i]", "mining.notify", sessionid, client->enonce1,
+			      n2len);
 	ck_runlock(&sdata->workbase_lock);
 
 	client->subscribed = true;
 
-	return ret;
+	return doc;
 }
 
 static double dsps_from_key(json_t *val, const char *key)
@@ -5531,8 +5559,8 @@ static void update_solo_client(sdata_t *sdata, workbase_t *wb, const int64_t cli
 }
 
 /* Needs to be entered with client holding a ref count. */
-static json_t *parse_authorise(stratum_instance_t *client, const json_t *params_val,
-			       json_t **err_val)
+static bool parse_authorise(stratum_instance_t *client, yyjson_mut_val *params_val,
+			    yyjson_mut_doc **err_doc)
 {
 	user_instance_t *user;
 	ckpool_t *ckp = client->ckp;
@@ -5541,37 +5569,37 @@ static json_t *parse_authorise(stratum_instance_t *client, const json_t *params_
 	int arr_size;
 	ts_t now;
 
-	if (unlikely(!json_is_array(params_val))) {
-		*err_val = json_string("params not an array");
+	if (unlikely(!yyjson_mut_is_arr(params_val))) {
+		*err_doc = yyjson_string("params not an array");
 		goto out;
 	}
-	arr_size = json_array_size(params_val);
+	arr_size = yyjson_mut_arr_size(params_val);
 	if (unlikely(arr_size < 1)) {
-		*err_val = json_string("params missing array entries");
+		*err_doc = yyjson_string("params missing array entries");
 		goto out;
 	}
 	if (unlikely(!client->useragent)) {
-		*err_val = json_string("Failed subscription");
+		*err_doc = yyjson_string("Failed subscription");
 		goto out;
 	}
-	buf = json_string_value(json_array_get(params_val, 0));
+	buf = yyjson_mut_get_str(yyjson_mut_arr_get(params_val, 0));
 	if (!buf) {
-		*err_val = json_string("Invalid workername parameter");
+		*err_doc = yyjson_string("Invalid workername parameter");
 		goto out;
 	}
 	if (!strlen(buf)) {
-		*err_val = json_string("Empty workername parameter");
+		*err_doc = yyjson_string("Empty workername parameter");
 		goto out;
 	}
 	if (!memcmp(buf, ".", 1) || !memcmp(buf, "_", 1)) {
-		*err_val = json_string("Empty username parameter");
+		*err_doc = yyjson_string("Empty username parameter");
 		goto out;
 	}
 	if (strchr(buf, '/')) {
-		*err_val = json_string("Invalid character in username");
+		*err_doc = yyjson_string("Invalid character in username");
 		goto out;
 	}
-	pass = json_string_value(json_array_get(params_val, 1));
+	pass = yyjson_mut_get_str(yyjson_mut_arr_get(params_val, 1));
 	user = generate_user(ckp, client, buf);
 	client->user_id = user->id;
 	ts_realtime(&now);
@@ -5629,30 +5657,30 @@ out:
 
 		stratum_send_diff(sdata, client);
 	}
-	return json_boolean(ret);
+	return ret;
 }
 
 /* Needs to be entered with client holding a ref count. */
 static void stratum_send_diff(sdata_t *sdata, const stratum_instance_t *client)
 {
-	json_t *json_msg;
+	yyjson_mut_doc *doc;
 
-	JSON_CPACK(json_msg, "{s[I]soss}", "params", client->diff, "id", json_null(),
-			     "method", "mining.set_difficulty");
-	stratum_add_send(sdata, json_msg, client->id, SM_DIFF);
+	doc = yyjson_mut_pack("{s[I]snss}", "params", client->diff, "id", "method",
+			      "mining.set_difficulty");
+	stratum_add_yysend(sdata, doc, client->id, SM_DIFF);
 }
 
 /* Needs to be entered with client holding a ref count. */
 static void stratum_send_message(sdata_t *sdata, const stratum_instance_t *client, const char *msg)
 {
-	json_t *json_msg;
+	yyjson_mut_doc *doc;
 
 	/* Only send messages to whitelisted clients */
 	if (!client->messages)
 		return;
-	JSON_CPACK(json_msg, "{sosss[s]}", "id", json_null(), "method", "client.show_message",
-			     "params", msg);
-	stratum_add_send(sdata, json_msg, client->id, SM_MSG);
+	doc = yyjson_mut_pack("{snsss[s]}", "id", "method", "client.show_message",
+			      "params", msg);
+	stratum_add_yysend(sdata, doc, client->id, SM_MSG);
 }
 
 static double time_bias(const double tdiff, const double period)
@@ -6549,18 +6577,6 @@ static void send_yyjson_err(sdata_t *sdata, const int64_t client_id, yyjson_mut_
 	stratum_add_yysend(sdata, doc, client_id, SM_ERROR);
 }
 
-static void send_json_err(sdata_t *sdata, const int64_t client_id, json_t *id_val, const char *err_msg)
-{
-	json_t *val;
-
-	/* Some clients have no id_val so pass back an empty string. */
-	if (unlikely(!id_val))
-		JSON_CPACK(val, "{ssss}", "id", "", "error", err_msg);
-	else
-		JSON_CPACK(val, "{soss}", "id", json_deep_copy(id_val), "error", err_msg);
-	stratum_add_send(sdata, val, client_id, SM_ERROR);
-}
-
 /* Needs to be entered with client holding a ref count. */
 static void update_client(const stratum_instance_t *client, const int64_t client_id)
 {
@@ -6575,12 +6591,38 @@ static json_params_t
 *create_json_params(const int64_t client_id, const json_t *method, const json_t *params,
 		    const json_t *id_val)
 {
-	json_params_t *jp = ckalloc(sizeof(json_params_t));
+	json_params_t *jp = ckzalloc(sizeof(json_params_t));
 
 	jp->method = json_deep_copy(method);
 	jp->params = json_deep_copy(params);
 	jp->id_val = json_deep_copy(id_val);
 	jp->client_id = client_id;
+
+	return jp;
+}
+
+static json_params_t
+*create_yyjson_params(const int64_t client_id, yyjson_mut_val *method, yyjson_mut_val *params,
+		      yyjson_mut_val *id_val)
+{
+	json_params_t *jp = ckzalloc(sizeof(json_params_t));
+
+	jp->doc = yyjson_mut_doc_new(NULL);
+	jp->yymethod = yyjson_mut_val_mut_copy(jp->doc, method);
+	jp->yyparams = yyjson_mut_val_mut_copy(jp->doc, params);
+	jp->yyid_val = yyjson_mut_val_mut_copy(jp->doc, id_val);
+	jp->client_id = client_id;
+
+#if 0
+	/* Braindead conversion for now */
+	json_t *val = yyjson_to_json(jp->doc);
+	json_object_set_new(jp->method, "method", val);
+	json_object_set_new(jp->params, "params", val);
+	json_object_set_new(jp->id_val, "id", val);
+	json_decref(val);
+#endif
+
+	LOGINFO("create_yyjson_params");
 	return jp;
 }
 
@@ -6588,17 +6630,17 @@ static json_params_t
  * documented form of placing diff within the method. Needs to be entered with
  * client holding a ref count. */
 static void suggest_diff(ckpool_t *ckp, stratum_instance_t *client, const char *method,
-			 const json_t *params_val)
+			 yyjson_mut_val *params_val)
 {
-	json_t *arr_val = json_array_get(params_val, 0);
+	yyjson_mut_val *arr_val = yyjson_mut_arr_get(params_val, 0);
 	int64_t sdiff;
 
 	if (unlikely(!client_active(client))) {
 		LOGNOTICE("Attempted to suggest diff on unauthorised client %s", client->identity);
 		return;
 	}
-	if (arr_val && json_is_integer(arr_val))
-		sdiff = json_integer_value(arr_val);
+	if (arr_val && yyjson_mut_is_sint(arr_val))
+		sdiff = yyjson_mut_get_sint(arr_val);
 	else if (sscanf(method, "mining.suggest_difficulty(%"PRId64, &sdiff) != 1) {
 		LOGINFO("Failed to parse suggest_difficulty for client %s", client->identity);
 		return;
@@ -6706,17 +6748,17 @@ static void add_remote_server(sdata_t *sdata, stratum_instance_t *client)
 
 /* Enter with client holding ref count */
 static void parse_method(ckpool_t *ckp, sdata_t *sdata, stratum_instance_t *client,
-			 const int64_t client_id, json_t *id_val, json_t *method_val,
-			 json_t *params_val)
+			 const int64_t client_id, yyjson_mut_val *id_val, yyjson_mut_val *method_val,
+			 yyjson_mut_val *params_val)
 {
 	const char *method;
 
 	/* Random broken clients send something not an integer as the id so we
 	 * copy the json item for id_val as is for the response. By far the
 	 * most common messages will be shares so look for those first */
-	method = json_string_value(method_val);
+	method = yyjson_mut_get_str(method_val);
 	if (likely(cmdmatch(method, "mining.submit") && client->authorised)) {
-		json_params_t *jp = create_json_params(client_id, method_val, params_val, id_val);
+		json_params_t *jp = create_yyjson_params(client_id, method_val, params_val, id_val);
 
 		ckmsgq_add(sdata->sshareq, jp);
 		return;
@@ -6729,24 +6771,34 @@ static void parse_method(ckpool_t *ckp, sdata_t *sdata, stratum_instance_t *clie
 	}
 
 	if (cmdmatch(method, "mining.subscribe")) {
-		json_t *val, *result_val;
+		yyjson_mut_doc *doc, *result_doc;
+		yyjson_mut_val *result_root, *result_val, *newid_val, *root;
 
 		if (unlikely(client->subscribed)) {
 			LOGNOTICE("Client %s %s trying to subscribe twice",
 				  client->identity, client->address);
 			return;
 		}
-		result_val = parse_subscribe(client, client_id, params_val);
+		result_doc = parse_subscribe(client, client_id, params_val);
 		/* Shouldn't happen, sanity check */
-		if (unlikely(!result_val)) {
-			LOGWARNING("parse_subscribe returned NULL result_val");
+		if (unlikely(!result_doc)) {
+			LOGWARNING("parse_subscribe returned NULL result_doc");
 			return;
 		}
-		val = json_object();
-		json_object_set_new_nocheck(val, "result", result_val);
-		json_object_set_nocheck(val, "id", id_val);
-		json_object_set_new_nocheck(val, "error", json_null());
-		stratum_add_send(sdata, val, client_id, SM_SUBSCRIBERESULT);
+
+		result_root = yyjson_mut_doc_get_root(result_doc);
+		doc = yyjson_mut_doc_new(NULL);
+		result_val = yyjson_mut_val_mut_copy(doc, result_root);
+		newid_val = yyjson_mut_val_mut_copy(doc, id_val);
+		yyjson_mut_doc_free(result_doc);
+
+		root = yyjson_mut_pack_val(doc, "{sososn}",
+			"result", result_val,
+			"id", newid_val,
+			"error");
+		yyjson_mut_doc_set_root(doc, root);
+
+		stratum_add_yysend(sdata, doc, client_id, SM_SUBSCRIBERESULT);
 		if (likely(client->subscribed))
 			init_client(client, client_id);
 		return;
@@ -6820,25 +6872,33 @@ static void parse_method(ckpool_t *ckp, sdata_t *sdata, stratum_instance_t *clie
 				client->identity, client->address);
 			return;
 		}
-		jp = create_json_params(client_id, method_val, params_val, id_val);
+		jp = create_yyjson_params(client_id, method_val, params_val, id_val);
 		ckmsgq_add(sdata->sauthq, jp);
 		return;
 	}
 
         if (cmdmatch(method, "mining.configure")) {
-		json_t *val, *result_val;
+		yyjson_mut_doc *doc;
+		yyjson_mut_val *root, *newid_val;
+
 		char version_str[12];
 
 		LOGINFO("Mining configure requested from %s %s", client->identity,
 			client->address);
 		sprintf(version_str, "%08x", ckp->version_mask);
-		val = json_object();
-		JSON_CPACK(result_val, "{sbss}", "version-rolling", json_true(),
-			   "version-rolling.mask", version_str);
-		json_object_set_new_nocheck(val, "result", result_val);
-		json_object_set_nocheck(val, "id", id_val);
-		json_object_set_new_nocheck(val, "error", json_null());
-		stratum_add_send(sdata, val, client_id, SM_CONFIGURE);
+
+		doc = yyjson_mut_doc_new(NULL);
+		newid_val = yyjson_mut_val_mut_copy(doc, id_val);
+
+		root = yyjson_mut_pack_val(doc, "{s{sbss}sosn}",
+			"result",
+			"version-rolling", true,
+			"version-rolling.mask", version_str,
+			"id", newid_val,
+			"error");
+		yyjson_mut_doc_set_root(doc, root);
+
+		stratum_add_yysend(sdata, doc, client_id, SM_CONFIGURE);
 		return;
 	}
 
@@ -6865,7 +6925,7 @@ static void parse_method(ckpool_t *ckp, sdata_t *sdata, stratum_instance_t *clie
 
 	/* Covers both get_transactions and get_txnhashes */
 	if (cmdmatch(method, "mining.get")) {
-		json_params_t *jp = create_json_params(client_id, method_val, params_val, id_val);
+		json_params_t *jp = create_yyjson_params(client_id, method_val, params_val, id_val);
 
 		ckmsgq_add(sdata->stxnq, jp);
 		return;
@@ -7063,14 +7123,22 @@ static void parse_remote_shareerr(ckpool_t *ckp, json_t *val, const char *buf)
 }
 
 static void send_auth_response(sdata_t *sdata, const int64_t client_id, const bool ret,
-			       json_t *id_val, json_t *err_val)
+			       yyjson_mut_val *id_val, yyjson_mut_val *err_val)
 {
-	json_t *json_msg = json_object();
+	yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
+	yyjson_mut_val *newid_val, *newerr_val;
 
-	json_object_set_new_nocheck(json_msg, "result", json_boolean(ret));
-	json_object_set_new_nocheck(json_msg, "error", err_val ? err_val : json_null());
-	json_object_set(json_msg, "id", id_val);
-	stratum_add_send(sdata, json_msg, client_id, SM_AUTHRESULT);
+	if (!err_val)
+		newerr_val = yyjson_mut_null(doc);
+	else
+		newerr_val = yyjson_mut_val_mut_copy(doc, err_val);
+	newid_val = yyjson_mut_val_mut_copy(doc, id_val);
+
+	doc = yyjson_mut_pack("{sbsoso}",
+		"result", ret,
+		"error", newerr_val,
+		"id", newid_val);
+	stratum_add_yysend(sdata, doc, client_id, SM_AUTHRESULT);
 }
 
 static void send_auth_success(ckpool_t *ckp, sdata_t *sdata, stratum_instance_t *client)
@@ -7142,7 +7210,8 @@ void parse_upstream_auth(ckpool_t *ckp, json_t *val)
 		send_auth_success(ckp, sdata, client);
 	else
 		send_auth_failure(sdata, client);
-	send_auth_response(sdata, client_id, ret, id_val, err_val);
+	/* FIXME missing yyjson conversion */
+	//send_auth_response(sdata, client_id, ret, id_val, err_val);
 	client_auth(ckp, client, client->user_instance, ret);
 	dec_instance_ref(sdata, client);
 out:
@@ -7490,13 +7559,17 @@ static void node_client_msg(ckpool_t *ckp, json_t *val, stratum_instance_t *clie
 			parse_diff(client, params);
 			break;
 		case SM_SUBSCRIBE:
-			parse_subscribe(client, client->id, params);
+			yyjson_mut_doc *doc = json_to_yyjson(params);
+			yyjson_mut_val *yyparams = yyjson_mut_doc_get_root(doc);
+			parse_subscribe(client, client->id, yyparams);
+			yyjson_mut_doc_free(doc);
 			break;
 		case SM_SUBSCRIBERESULT:
 			parse_subscribe_result(client, res_val);
 			break;
 		case SM_AUTH:
-			parse_authorise(client, params, &err_val);
+			/* FIXME yyjson */
+			//parse_authorise(client, params, &err_val);
 			break;
 		case SM_AUTHRESULT:
 			parse_authorise_result(ckp, sdata, client, res_val);
@@ -7543,8 +7616,9 @@ static void parse_node_msg(ckpool_t *ckp, sdata_t *sdata, json_t *val)
 /* Entered with client holding ref count */
 static void parse_instance_msg(ckpool_t *ckp, sdata_t *sdata, smsg_t *msg, stratum_instance_t *client)
 {
-	json_t *val = msg->json_msg, *id_val, *method, *params;
+	yyjson_mut_val *root, *id_val, *method, *params;
 	int64_t client_id = msg->client_id;
+	yyjson_mut_doc *doc;
 	int delays = 0;
 
 	if (client->reject == 3) {
@@ -7554,16 +7628,19 @@ static void parse_instance_msg(ckpool_t *ckp, sdata_t *sdata, smsg_t *msg, strat
 		return;
 	}
 
-	/* Return back the same id_val even if it's null or not existent. */
-	id_val = json_object_get(val, "id");
+	doc = msg->doc;
+	root = yyjson_mut_doc_get_root(doc);
 
-	method = json_object_get(val, "method");
+	/* Return back the same id_val even if it's null or not existent. */
+	id_val = yyjson_mut_obj_get(root, "id");
+
+	method = yyjson_mut_obj_get(root, "method");
 	if (unlikely(!method)) {
-		json_t *res_val = json_object_get(val, "result");
+		yyjson_mut_val *res_val = yyjson_mut_obj_get(root, "result");
 
 		/* Is this a spurious result or ping response? */
 		if (res_val) {
-			const char *result = json_string_value(res_val);
+			const char *result = yyjson_mut_get_str(res_val);
 
 			if (!safecmp(result, "pong"))
 				LOGDEBUG("Received pong from client %s", client->identity);
@@ -7572,18 +7649,19 @@ static void parse_instance_msg(ckpool_t *ckp, sdata_t *sdata, smsg_t *msg, strat
 					 result ? result : "", client->identity);
 			return;
 		}
-		send_json_err(sdata, client_id, id_val, "-3:method not found");
+		send_yyjson_err(sdata, client_id, doc, id_val, "-3:method not found");
 		return;
 	}
-	if (unlikely(!json_is_string(method))) {
-		send_json_err(sdata, client_id, id_val, "-1:method is not string");
+	if (unlikely(!yyjson_mut_is_str(method))) {
+		send_yyjson_err(sdata, client_id, doc, id_val, "-1:method is not string");
 		return;
 	}
-	params = json_object_get(val, "params");
+	params = yyjson_mut_obj_get(root, "params");
 	if (unlikely(!params)) {
-		send_json_err(sdata, client_id, id_val, "-1:params not found");
+		send_yyjson_err(sdata, client_id, doc, id_val, "-1:params not found");
 		return;
 	}
+
 	/* At startup we block until there's a current workbase otherwise we
 	 * will reject miners with the initialising message. A slightly delayed
 	 * response to subscribe is better tolerated. */
@@ -7744,6 +7822,8 @@ static void ssend_process(ckpool_t *ckp, smsg_t *msg)
 
 static void discard_json_params(json_params_t *jp)
 {
+	if (jp->doc)
+		yyjson_mut_doc_free(jp->doc);
 	json_decref(jp->method);
 	json_decref(jp->params);
 	if (jp->id_val)
@@ -7849,7 +7929,8 @@ static void upstream_auth(ckpool_t *ckp, stratum_instance_t *client, json_params
 
 static void sauth_process(ckpool_t *ckp, json_params_t *jp)
 {
-	json_t *result_val, *err_val = NULL;
+	yyjson_mut_doc *err_doc = NULL;
+	yyjson_mut_val *err_val;
 	sdata_t *sdata = ckp->sdata;
 	stratum_instance_t *client;
 	int64_t mindiff, client_id;
@@ -7863,8 +7944,7 @@ static void sauth_process(ckpool_t *ckp, json_params_t *jp)
 		goto out_noclient;
 	}
 
-	result_val = parse_authorise(client, jp->params, &err_val);
-	ret = json_is_true(result_val);
+	ret = parse_authorise(client, jp->yyparams, &err_doc);
 	if (ret) {
 		/* So far okay in remote mode, remainder to be done by upstream
 		 * pool */
@@ -7875,7 +7955,13 @@ static void sauth_process(ckpool_t *ckp, json_params_t *jp)
 		send_auth_success(ckp, sdata, client);
 	} else
 		send_auth_failure(sdata, client);
-	send_auth_response(sdata, client_id, ret, jp->id_val, err_val);
+	if (!err_doc) {
+		err_doc = yyjson_mut_doc_new(NULL);
+		err_val = yyjson_mut_null(err_doc);
+	} else
+		err_val = yyjson_mut_doc_get_root(err_doc);
+	send_auth_response(sdata, client_id, ret, jp->yyid_val, err_val);
+	yyjson_mut_doc_free(err_doc);
 	if (!ret)
 		goto out;
 
