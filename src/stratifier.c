@@ -7722,7 +7722,7 @@ static void srecv_process(ckpool_t *ckp, smsg_t *msg)
 	if (unlikely(noid))
 		LOGINFO("Stratifier added instance %s server %d", client->identity, server);
 
-	if (!msg->json_msg)
+	if (!msg->json_msg && (client->trusted || ckp->node))
 		msg->json_msg = yyjson_to_json(doc);
 
 	if (client->trusted)
