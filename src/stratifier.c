@@ -6610,8 +6610,8 @@ static void suggest_diff(ckpool_t *ckp, stratum_instance_t *client, const char *
 		LOGNOTICE("Attempted to suggest diff on unauthorised client %s", client->identity);
 		return;
 	}
-	if (arr_val && yyjson_mut_is_int(arr_val))
-		sdiff = yyjson_mut_get_int(arr_val);
+	if (arr_val && yyjson_mut_is_num(arr_val))
+		sdiff = yyjson_mut_get_num(arr_val);
 	else if (sscanf(method, "mining.suggest_difficulty(%"PRId64, &sdiff) != 1) {
 		LOGINFO("Failed to parse suggest_difficulty for client %s", client->identity);
 		return;
