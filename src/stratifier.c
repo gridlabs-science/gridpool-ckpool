@@ -3590,11 +3590,6 @@ static void stratum_add_send(sdata_t *sdata, json_t *val, const int64_t client_i
 		dec_instance_ref(sdata, remote);
 	}
 	LOGDEBUG("Sending stratum message %s", stratum_msgs[msg_type]);
-	if (ckp->loglevel > 5) {
-		char *msg = json_dumps(val, 0);
-		LOGINFO("j %s", msg);
-		free(msg);
-	}
 	msg = ckzalloc(sizeof(smsg_t));
 	msg->json_msg = val;
 	msg->client_id = client_id;
@@ -3604,9 +3599,8 @@ static void stratum_add_send(sdata_t *sdata, json_t *val, const int64_t client_i
 	free(msg);
 }
 
-static void _stratum_add_yysend(sdata_t *sdata, yyjson_mut_doc *doc, const int64_t client_id,
-			       const int msg_type, const char *file,
-			       const char *func, const int line)
+static void stratum_add_yysend(sdata_t *sdata, yyjson_mut_doc *doc, const int64_t client_id,
+			       const int msg_type)
 
 {
 	ckpool_t *ckp = sdata->ckp;
@@ -3637,10 +3631,6 @@ static void _stratum_add_yysend(sdata_t *sdata, yyjson_mut_doc *doc, const int64
 	}
 
 	LOGDEBUG("Sending stratum message %s", stratum_msgs[msg_type]);
-	if (ckp->loglevel > 5) {
-		char *msg = yyjson_mut_write(doc, 0, NULL);
-			LOGINFO("yyj from %s %s:%d %s", file, func, line, msg); free(msg);
-	}
 	msg = ckzalloc(sizeof(smsg_t));
 	msg->doc = doc;
 	msg->client_id = client_id;
@@ -3649,9 +3639,6 @@ static void _stratum_add_yysend(sdata_t *sdata, yyjson_mut_doc *doc, const int64
 	yyjson_mut_doc_free(doc);
 	free(msg);
 }
-
-#define stratum_add_yysend(sdata, doc, client_id, msg_type) \
-	_stratum_add_yysend(sdata, doc, client_id, msg_type, __FILE__, __func__, __LINE__)
 
 static void drop_client(ckpool_t *ckp, sdata_t *sdata, const int64_t id)
 {
@@ -4041,7 +4028,7 @@ char *stratifier_stats(ckpool_t *ckp, void *data)
  * own more than one minute later if we call reconnect again */
 static void reconnect_client(sdata_t *sdata, stratum_instance_t *client)
 {
-	json_t *json_msg;
+	yyjson_mut_doc *doc;
 
 	/* Already requested? */
 	if (client->reconnect_request) {
@@ -4050,9 +4037,8 @@ static void reconnect_client(sdata_t *sdata, stratum_instance_t *client)
 		return;
 	}
 	client->reconnect_request = time(NULL);
-	JSON_CPACK(json_msg, "{sosss[]}", "id", json_null(), "method", "client.reconnect",
-		   "params");
-	stratum_add_send(sdata, json_msg, client->id, SM_RECONNECT);
+	doc = yyjson_mut_pack("{snsss[]}", "id", "method", "client.reconnect", "params");
+	stratum_add_yysend(sdata, doc, client->id, SM_RECONNECT);
 }
 
 static void dead_proxy(ckpool_t *ckp, sdata_t *sdata, const char *buf)
@@ -7364,10 +7350,10 @@ void parse_upstream_block(ckpool_t *ckp, json_t *val)
 
 static void send_remote_pong(sdata_t *sdata, stratum_instance_t *client)
 {
-	json_t *json_msg;
+	yyjson_mut_doc *doc;
 
-	JSON_CPACK(json_msg, "{ss}", "method", "pong");
-	stratum_add_send(sdata, json_msg, client->id, SM_PONG);
+	doc = yyjson_mut_pack("{ss}", "method", "pong");
+	stratum_add_yysend(sdata, doc, client->id, SM_PONG);
 }
 
 static void add_node_txns(ckpool_t *ckp, sdata_t *sdata, const json_t *val)
@@ -7516,7 +7502,7 @@ out:
 /* Entered with client holding ref count */
 static void node_client_msg(ckpool_t *ckp, json_t *val, stratum_instance_t *client)
 {
-	json_t *params, *method, *res_val, *id_val, *err_val = NULL;
+	json_t *params, *method, *res_val, *id_val;
 	int msg_type = node_msg_type(val);
 	sdata_t *sdata = ckp->sdata;
 	json_params_t *jp;
@@ -7553,8 +7539,11 @@ static void node_client_msg(ckpool_t *ckp, json_t *val, stratum_instance_t *clie
 			parse_subscribe_result(client, res_val);
 			break;
 		case SM_AUTH:
-			/* FIXME yyjson */
-			//parse_authorise(client, params, &err_val);
+			yyjson_mut_doc *err_doc = NULL;
+			doc = json_to_yyjson(params);
+			yyparams = yyjson_mut_doc_get_root(doc);
+			parse_authorise(client, yyparams, &err_doc);
+			yyjson_mut_doc_free(doc);
 			break;
 		case SM_AUTHRESULT:
 			parse_authorise_result(ckp, sdata, client, res_val);
