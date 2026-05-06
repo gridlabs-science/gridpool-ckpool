@@ -7519,6 +7519,7 @@ static void node_client_msg(ckpool_t *ckp, json_t *val, stratum_instance_t *clie
 	json_t *params, *method, *res_val, *id_val;
 	int msg_type = node_msg_type(val);
 	sdata_t *sdata = ckp->sdata;
+	yyjson_mut_doc *tmpdoc;
 	json_params_t *jp;
 	char *buf = NULL;
 
@@ -7546,7 +7547,9 @@ static void node_client_msg(ckpool_t *ckp, json_t *val, stratum_instance_t *clie
 		case SM_SUBSCRIBE:
 			yyjson_mut_doc *doc = json_to_yyjson(params);
 			yyjson_mut_val *yyparams = yyjson_mut_doc_get_root(doc);
-			parse_subscribe(client, client->id, yyparams);
+			tmpdoc = parse_subscribe(client, client->id, yyparams);
+			if (tmpdoc)
+				yyjson_mut_doc_free(tmpdoc);
 			yyjson_mut_doc_free(doc);
 			break;
 		case SM_SUBSCRIBERESULT:
@@ -7808,7 +7811,7 @@ static void ssend_process(ckpool_t *ckp, smsg_t *msg)
 		connector_add_message(ckp, msg->json_msg);
 	}
 
-	/* The connector will free msg->json_msg */
+	/* The connector will free msg->json_msg or msg->doc */
 	free(msg);
 }
 
