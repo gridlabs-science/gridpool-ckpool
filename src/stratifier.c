@@ -6909,6 +6909,8 @@ static void parse_method(ckpool_t *ckp, sdata_t *sdata, stratum_instance_t *clie
 
 static void free_smsg(smsg_t *msg)
 {
+	if (msg->doc)
+		yyjson_mut_doc_free(msg->doc);
 	json_decref(msg->json_msg);
 	free(msg);
 }
