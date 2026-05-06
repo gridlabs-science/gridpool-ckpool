@@ -8322,7 +8322,7 @@ static void *statsupdate(void *arg)
 			worker = NULL;
 
 			workers_arr = yyjson_mut_arr(doc);
-			yyjson_mut_obj_add(root, yyjson_mut_strcpy(doc, "workers"), workers_arr);
+			yyjson_mut_obj_add(root, yyjson_mut_strcpy(doc, "worker"), workers_arr);
 
 			/* Decay times per worker */
 			while ((worker = next_worker(sdata, user, worker)) != NULL) {
