@@ -6105,25 +6105,25 @@ static void check_best_diff(sdata_t *sdata, user_instance_t *user,worker_instanc
 #define JSON_ERR(err) json_string(SHARE_ERR(err))
 
 /* Needs to be entered with client holding a ref count. */
-static json_t *parse_submit(stratum_instance_t *client, const json_t *params_val,
-			    json_t **err_val, enum share_err *err_code)
+static bool parse_submit(stratum_instance_t *client, yyjson_mut_val *params_val,
+			 enum share_err *err_code)
 {
 	bool share = false, result = false, invalid = true, submit = false, stale = false;
 	const char *workername, *job_id, *ntime, *version_mask;
 	double diff = client->diff, wdiff = 0, sdiff = -1;
 	char hexhash[68] = {}, sharehash[32], cdfield[64];
 	user_instance_t *user = client->user_instance;
-	char *fname = NULL, *s, *nonce, *nonce2;
+	char *fname = NULL, *nonce, *nonce2;
 	uint32_t ntime32, version_mask32 = 0;
 	sdata_t *sdata = client->sdata;
 	enum share_err err = SE_NONE;
 	ckpool_t *ckp = client->ckp;
 	char idstring[24] = {};
 	workbase_t *wb = NULL;
+	yyjson_mut_doc *doc;
 	uchar hash[32];
 	int nlen, len;
 	time_t now_t;
-	json_t *val;
 	int64_t id;
 	ts_t now;
 	FILE *fp;
@@ -6132,61 +6132,52 @@ static json_t *parse_submit(stratum_instance_t *client, const json_t *params_val
 	now_t = now.tv_sec;
 	sprintf(cdfield, "%lu,%lu", now.tv_sec, now.tv_nsec);
 
-	if (unlikely(!json_is_array(params_val))) {
+	if (unlikely(!yyjson_mut_is_arr(params_val))) {
 		err = SE_NOT_ARRAY;
-		*err_val = JSON_ERR(err);
 		goto out;
 	}
-	if (unlikely(json_array_size(params_val) < 5)) {
+	if (unlikely(yyjson_mut_arr_size(params_val) < 5)) {
 		err = SE_INVALID_SIZE;
-		*err_val = JSON_ERR(err);
 		goto out;
 	}
-	workername = json_string_value(json_array_get(params_val, 0));
+	workername = yyjson_mut_get_str(yyjson_mut_arr_get(params_val, 0));
 	if (unlikely(!workername || !strlen(workername))) {
 		err = SE_NO_USERNAME;
-		*err_val = JSON_ERR(err);
 		goto out;
 	}
-	job_id = json_string_value(json_array_get(params_val, 1));
+	job_id = yyjson_mut_get_str(yyjson_mut_arr_get(params_val, 1));
 	if (unlikely(!job_id || !strlen(job_id))) {
 		err = SE_NO_JOBID;
-		*err_val = JSON_ERR(err);
 		goto out;
 	}
-	nonce2 = (char *)json_string_value(json_array_get(params_val, 2));
+	nonce2 = (char *)yyjson_mut_get_str(yyjson_mut_arr_get(params_val, 2));
 	if (unlikely(!nonce2 || !strlen(nonce2) || !validhex(nonce2))) {
 		err = SE_NO_NONCE2;
-		*err_val = JSON_ERR(err);
 		goto out;
 	}
-	ntime = json_string_value(json_array_get(params_val, 3));
+	ntime = yyjson_mut_get_str(yyjson_mut_arr_get(params_val, 3));
 	if (unlikely(!ntime || !strlen(ntime) || !validhex(ntime))) {
 		err = SE_NO_NTIME;
-		*err_val = JSON_ERR(err);
 		goto out;
 	}
-	nonce = (char *)json_string_value(json_array_get(params_val, 4));
+	nonce = (char *)yyjson_mut_get_str(yyjson_mut_arr_get(params_val, 4));
 	if (unlikely(!nonce || strlen(nonce) < 8 || !validhex(nonce))) {
 		err = SE_NO_NONCE;
-		*err_val = JSON_ERR(err);
 		goto out;
 	}
 
-	version_mask = json_string_value(json_array_get(params_val, 5));
+	version_mask = yyjson_mut_get_str(yyjson_mut_arr_get(params_val, 5));
 	if (version_mask && strlen(version_mask) && validhex(version_mask)) {
 		sscanf(version_mask, "%x", &version_mask32);
 		// check version mask
 		if (version_mask32 && ((~ckp->version_mask) & version_mask32) != 0) {
 			// means client changed some bits which server doesn't allow to change
 			err = SE_INVALID_VERSION_MASK;
-			*err_val = JSON_ERR(err);
 			goto out;
 		}
 	}
 	if (safecmp(workername, client->workername)) {
 		err = SE_WORKER_MISMATCH;
-		*err_val = JSON_ERR(err);
 		goto out;
 	}
 	sscanf(job_id, "%lx", &id);
@@ -6196,16 +6187,14 @@ static json_t *parse_submit(stratum_instance_t *client, const json_t *params_val
 
 	if (unlikely(!sdata->current_workbase)) {
 		err = SE_NO_WORKBASE;
-		*err_val = JSON_ERR(err);
 		*err_code = err;
-		return json_boolean(false);
+		return false;
 	}
 
 	wb = get_workbase(sdata, id);
 	if (unlikely(!wb)) {
 		id = sdata->current_workbase->id;
 		err = SE_INVALID_JOBID;
-		*err_val = JSON_ERR(err);
 		strncpy(idstring, job_id, 19);
 		ASPRINTF(&fname, "%s.sharelog", sdata->current_workbase->logdir);
 		goto out_nowb;
@@ -6267,14 +6256,12 @@ static json_t *parse_submit(stratum_instance_t *client, const json_t *params_val
 			}
 		}
 		err = SE_STALE;
-		*err_val = JSON_ERR(err);
 		goto out_submit;
 	}
 no_stale:
 	/* Ntime cannot be less, but allow forward ntime rolling up to max */
 	if (ntime32 < wb->ntime32 || ntime32 > wb->ntime32 + 7000) {
 		err = SE_NTIME_INVALID;
-		*err_val = JSON_ERR(err);
 		goto out_put;
 	}
 	invalid = false;
@@ -6307,7 +6294,6 @@ out_nowb:
 				result = true;
 			} else {
 				err = SE_DUPE;
-				*err_val = JSON_ERR(err);
 				LOGINFO("Rejected client %s dupe diff %.1f/%.0f/%s: %s",
 					client->identity, sdiff, diff, wdiffsuffix, hexhash);
 				submit = false;
@@ -6316,7 +6302,6 @@ out_nowb:
 			err = SE_HIGH_DIFF;
 			LOGINFO("Rejected client %s high diff %.1f/%.0f/%s: %s",
 				client->identity, sdiff, diff, wdiffsuffix, hexhash);
-			*err_val = JSON_ERR(err);
 			submit = false;
 		}
 	}  else
@@ -6331,39 +6316,32 @@ out_nowb:
 
 	add_submit(ckp, client, diff, result, submit);
 
-	/* Now write to the pool's sharelog. */
-	val = json_object();
-	json_set_int(val, "workinfoid", id);
-	if (ckp->remote)
-		json_set_int64(val, "clientid", client->virtualid);
-	else
-		json_set_int64(val, "clientid", client->id);
-	json_set_string(val, "enonce1", client->enonce1);
-	json_set_string(val, "nonce2", nonce2);
-	json_set_string(val, "nonce", nonce);
-	json_set_string(val, "ntime", ntime);
-	json_set_double(val, "diff", diff);
-	json_set_double(val, "sdiff", sdiff);
-	json_set_string(val, "hash", hexhash);
-	json_set_bool(val, "result", result);
-	json_object_set(val, "error", *err_val);
-	json_set_int(val, "errn", err);
-	json_set_string(val, "createdate", cdfield);
-	json_set_string(val, "createby", "code");
-	json_set_string(val, "createcode", __func__);
-	json_set_string(val, "createinet", ckp->serverurl[client->server]);
-	json_set_string(val, "workername", client->workername);
-	json_set_string(val, "username", user->username);
-        json_set_string(val, "address", client->address);
-        json_set_string(val, "agent", client->useragent);
+	doc = yyjson_mut_pack("{sisIsssssssssfsfsssbsssissssssssssssssss}",
+		"workinfoid", id,
+		"clientid", ckp->remote ? client->virtualid : client->id,
+		"enonce1", client->enonce1,
+		"nonce2", nonce2,
+		"nonce", nonce,
+		"ntime", ntime,
+		"diff", diff,
+		"sdiff", sdiff,
+		"hash", hexhash,
+		"result", result,
+		"error", SHARE_ERR(err),
+		"errn", err,
+		"createdate", cdfield,
+		"createby", "code",
+		"createcode", __func__,
+		"createinet", ckp->serverurl[client->server],
+		"workername", client->workername,
+		"username", user->username,
+		"address", client->address,
+		"agent", client->useragent);
 
 	if (ckp->logshares) {
 		fp = fopen(fname, "ae");
 		if (likely(fp)) {
-			s = json_dumps(val, JSON_EOL);
-			len = strlen(s);
-			len = fprintf(fp, "%s", s);
-			free(s);
+			yyjson_mut_write_file(fname, doc, YYJSON_WRITE_NEWLINE_AT_END, NULL, NULL);
 			fclose(fp);
 			if (unlikely(len < 0))
 				LOGERR("Failed to fwrite to %s", fname);
@@ -6371,8 +6349,8 @@ out_nowb:
 			LOGERR("Failed to fopen %s", fname);
 	}
 	if (ckp->remote)
-		upstream_json_msgtype(ckp, val, SM_SHARE);
-	json_decref(val);
+		upstream_json_msgtype(ckp, yyjson_to_json(doc), SM_SHARE);
+	yyjson_mut_doc_free(doc);
 out:
 	if (!sdata->wbincomplete && ((!result && !submit) || !share)) {
 		/* Is this the first in a run of invalids? */
@@ -6402,6 +6380,8 @@ out:
 
 	if (!share) {
 		if (ckp->remote) {
+#if 0
+			/* FIXME unused val */
 			val = json_object();
 			if (ckp->remote)
 				json_set_int64(val, "clientid", client->virtualid);
@@ -6413,19 +6393,20 @@ out:
 			json_set_int(val, "workinfoid", sdata->current_workbase->id);
 			json_set_string(val, "workername", client->workername);
 			json_set_string(val, "username", user->username);
-			json_object_set(val, "error", *err_val);
+			json_set_string(val, "error", SHARE_ERR(err));
 			json_set_int(val, "errn", err);
 			json_set_string(val, "createdate", cdfield);
 			json_set_string(val, "createby", "code");
 			json_set_string(val, "createcode", __func__);
 			json_set_string(val, "createinet", ckp->serverurl[client->server]);
 			json_decref(val);
+#endif
 		}
 		LOGINFO("Invalid share from client %s: %s", client->identity, client->workername);
 	}
 	free(fname);
 	*err_code = err;
-	return json_boolean(result);
+	return result;
 }
 
 /* Must enter with workbase_lock held */
@@ -6613,16 +6594,6 @@ static json_params_t
 	jp->yyid_val = yyjson_mut_val_mut_copy(jp->doc, id_val);
 	jp->client_id = client_id;
 
-#if 0
-	/* Braindead conversion for now */
-	json_t *val = yyjson_to_json(jp->doc);
-	json_object_set_new(jp->method, "method", val);
-	json_object_set_new(jp->params, "params", val);
-	json_object_set_new(jp->id_val, "id", val);
-	json_decref(val);
-#endif
-
-	LOGINFO("create_yyjson_params");
 	return jp;
 }
 
@@ -7840,11 +7811,13 @@ static void steal_json_id(json_t *val, json_params_t *jp)
 
 static void sshare_process(ckpool_t *ckp, json_params_t *jp)
 {
-	json_t *result_val, *json_msg, *err_val = NULL;
 	enum share_err err_code = SE_NONE;
+	yyjson_mut_val *root, *newid_val;
 	stratum_instance_t *client;
 	sdata_t *sdata = ckp->sdata;
+	yyjson_mut_doc *doc;
 	int64_t client_id;
+	bool result;
 
 	client_id = jp->client_id;
 
@@ -7857,23 +7830,23 @@ static void sshare_process(ckpool_t *ckp, json_params_t *jp)
 		LOGDEBUG("Client %s no longer authorised to submit shares", client->identity);
 		goto out_decref;
 	}
-	json_msg = json_object();
-	result_val = parse_submit(client, jp->params, &err_val, &err_code);
-	if (err_val) {
-		json_t *err_array = json_array();
-
-		json_decref(result_val);
-		json_object_set_new_nocheck(json_msg, "result", json_null());
-		json_array_append_new(err_array, json_integer(SHARE_ERR_CODE(err_code)));
-		json_array_append_new(err_array, err_val);
-		json_array_append_new(err_array, json_null());
-		json_object_set_new_nocheck(json_msg, "error", err_array);
+	result = parse_submit(client, jp->yyparams, &err_code);
+	doc = yyjson_mut_doc_new(NULL);
+	newid_val = yyjson_mut_val_mut_copy(doc, jp->yyid_val);
+	if (err_code != SE_NONE) {
+		root = yyjson_mut_pack_val(doc, "{sn[isn]so}",
+			"result",
+			SHARE_ERR_CODE(err_code),
+			SHARE_ERR(err_code),
+			"id", newid_val);
 	} else {
-		json_object_set_new_nocheck(json_msg, "result", result_val);
-		json_object_set_new_nocheck(json_msg, "error", json_null());
+		root = yyjson_mut_pack_val(doc, "{sbsnso}",
+			"result", result,
+			"error",
+			"id", newid_val);
 	}
-	steal_json_id(json_msg, jp);
-	stratum_add_send(sdata, json_msg, client_id, SM_SHARERESULT);
+	yyjson_mut_doc_set_root(doc, root);
+	stratum_add_yysend(sdata, doc, client_id, SM_SHARERESULT);
 out_decref:
 	dec_instance_ref(sdata, client);
 out:
