@@ -7111,7 +7111,7 @@ static void send_yyauth_response(sdata_t *sdata, const int64_t client_id, const 
 				 yyjson_mut_val *id_val, yyjson_mut_val *err_val)
 {
 	yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
-	yyjson_mut_val *newid_val, *newerr_val;
+	yyjson_mut_val *root, *newid_val, *newerr_val;
 
 	if (!err_val)
 		newerr_val = yyjson_mut_null(doc);
@@ -7119,10 +7119,11 @@ static void send_yyauth_response(sdata_t *sdata, const int64_t client_id, const 
 		newerr_val = yyjson_mut_val_mut_copy(doc, err_val);
 	newid_val = yyjson_mut_val_mut_copy(doc, id_val);
 
-	doc = yyjson_mut_pack("{sbsoso}",
+	root = yyjson_mut_pack_val(doc, "{sbsoso}",
 		"result", ret,
 		"error", newerr_val,
 		"id", newid_val);
+	yyjson_mut_doc_set_root(doc, root);
 	stratum_add_yysend(sdata, doc, client_id, SM_AUTHRESULT);
 }
 
