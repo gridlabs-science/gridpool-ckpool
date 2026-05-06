@@ -7784,7 +7784,7 @@ void _stratifier_add_yyrecv(ckpool_t *ckp, yyjson_mut_doc *doc, const char *file
 
 static void ssend_process(ckpool_t *ckp, smsg_t *msg)
 {
-	if (unlikely(!msg->json_msg && !msg->doc)) {
+	if (unlikely(!msg->doc && !msg->json_msg)) {
 		LOGERR("Sent null json msg to stratum_sender");
 		free(msg);
 		return;
@@ -7799,6 +7799,9 @@ static void ssend_process(ckpool_t *ckp, smsg_t *msg)
 
 		yyjson_mut_obj_add_sint(doc, root, "client_id", msg->client_id);
 		connector_add_yymessage(ckp, doc);
+		/* In case we have both doc and json_msg */
+		if (unlikely(msg->json_msg))
+			json_decref(msg->json_msg);
 	} else {
 		/* Working with jansson */
 		json_object_set_new_nocheck(msg->json_msg, "client_id", json_integer(msg->client_id));
