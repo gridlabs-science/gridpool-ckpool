@@ -6579,6 +6579,20 @@ static json_params_t
 	jp->id_val = json_deep_copy(id_val);
 	jp->client_id = client_id;
 
+	/* Braindead conversion to yyjson for now */
+	json_t *val;
+	yyjson_mut_val *root;
+	JSON_CPACK(val, "{sososo}",
+		"method", jp->method,
+		"params", jp->params,
+		"id", jp->id_val);
+	jp->doc = json_to_yyjson(val);
+	json_decref(val);
+	root = yyjson_mut_doc_get_root(jp->doc);
+	jp->yymethod = yyjson_mut_obj_get(root, "method");
+	jp->yyparams = yyjson_mut_obj_get(root, "params");
+	jp->yyid_val = yyjson_mut_obj_get(root, "id");
+
 	return jp;
 }
 
