@@ -549,7 +549,9 @@ reparse:
 		return false;
 	}
 
-	if (!(sdoc = yyjson_read(client->buf, strlen(client->buf), YYJSON_READ_STOP_WHEN_DONE))) {
+	/* Filter out non- or incomplete json */
+	if (unlikely(client->buf[0] != '{' ||
+	    !(sdoc = yyjson_read(client->buf, strlen(client->buf), YYJSON_READ_STOP_WHEN_DONE)))) {
 		char *buf = strdup("Invalid JSON, disconnecting\n");
 
 		LOGINFO("Client id %"PRId64" sent invalid json message %s", client->id, client->buf);
