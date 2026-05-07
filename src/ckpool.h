@@ -19,6 +19,7 @@
 #include "libckpool.h"
 #include "uthash.h"
 #include "yyjson.h"
+#include "yyjson_util.h"
 
 #define RPC_TIMEOUT 60
 
