@@ -7696,7 +7696,7 @@ static void srecv_process(ckpool_t *ckp, smsg_t *msg)
 		goto out;
 	}
 
-	msg->client_id = yyjson_mut_get_int(val);
+	msg->client_id = yyjson_mut_get_num(val);
 	yyjson_mut_obj_clear(val);
 
 	val = yyjson_mut_obj_get(root, "address");
@@ -7714,7 +7714,7 @@ static void srecv_process(ckpool_t *ckp, smsg_t *msg)
 		LOGWARNING("Failed to extract server from connector json smsg %s", buf);
 		goto out;
 	}
-	server = yyjson_mut_get_sint(val);
+	server = yyjson_mut_get_num(val);
 	yyjson_mut_obj_clear(val);
 
 	/* Parse the message here */

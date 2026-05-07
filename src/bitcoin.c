@@ -175,11 +175,11 @@ bool gen_gbtbase(connsock_t *cs, gbtbase_t *gbt)
 
 	previousblockhash = yyjson_get_str(yyjson_obj_get(res_val, "previousblockhash"));
 	target = yyjson_get_str(yyjson_obj_get(res_val, "target"));
-	version = yyjson_get_int(yyjson_obj_get(res_val, "version"));
-	curtime = yyjson_get_int(yyjson_obj_get(res_val, "curtime"));
+	version = yyjson_get_num(yyjson_obj_get(res_val, "version"));
+	curtime = yyjson_get_num(yyjson_obj_get(res_val, "curtime"));
 	bits = yyjson_get_str(yyjson_obj_get(res_val, "bits"));
-	height = yyjson_get_int(yyjson_obj_get(res_val, "height"));
-	coinbasevalue = yyjson_get_sint(yyjson_obj_get(res_val, "coinbasevalue"));
+	height = yyjson_get_num(yyjson_obj_get(res_val, "height"));
+	coinbasevalue = yyjson_get_num(yyjson_obj_get(res_val, "coinbasevalue"));
 	coinbase_aux = yyjson_obj_get(res_val, "coinbaseaux");
 	flags = yyjson_get_str(yyjson_obj_get(coinbase_aux, "flags"));
 	if (!flags)
@@ -278,7 +278,7 @@ int get_blockcount(connsock_t *cs)
 		LOGWARNING("Failed to get result in json response to getblockcount");
 		goto out;
 	}
-	ret = yyjson_get_int(res_val);
+	ret = yyjson_get_num(res_val);
 out:
 	yyjson_doc_free(doc);
 	return ret;

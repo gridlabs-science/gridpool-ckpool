@@ -565,7 +565,7 @@ reparse:
 		if (client->passthrough) {
 			int64_t passthrough_id;
 
-			passthrough_id = yyjson_mut_get_sint(yyjson_mut_obj_get(root, "client_id"));
+			passthrough_id = yyjson_mut_get_num(yyjson_mut_obj_get(root, "client_id"));
 			passthrough_id = (client->id << 32) | passthrough_id;
 			yyjson_mut_obj_remove_key(root, "client_id");
 			yyjson_mut_obj_add_sint(doc, root, "client_id", passthrough_id);
@@ -1374,7 +1374,7 @@ static void client_yymessage_processor(ckpool_t *ckp, yyjson_mut_doc *doc)
 	int64_t client_id;
 
 	/* Extract the client id from the json message and remove its entry */
-	client_id = yyjson_mut_get_int(yyjson_mut_obj_get(root, "client_id"));
+	client_id = yyjson_mut_get_num(yyjson_mut_obj_get(root, "client_id"));
 	yyjson_mut_obj_remove_key(root, "client_id");
 	/* Put client_id back in for a passthrough subclient, passing its
 	 * upstream client_id instead of the passthrough's. */
