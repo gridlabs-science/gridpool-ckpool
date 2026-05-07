@@ -587,10 +587,9 @@ reparse:
 		if (likely(!client->invalid)) {
 			if (!ckp->passthrough)
 				stratifier_add_yyrecv(ckp, doc);
-			else if (ckp->node) {
-				stratifier_add_recv(ckp, yyjson_to_json(doc));
-				yyjson_mut_doc_free(doc);
-			} else if (ckp->passthrough) {
+			else if (ckp->node)
+				stratifier_add_yyrecv(ckp, doc);
+			else if (ckp->passthrough) {
 				generator_add_send(ckp, yyjson_to_json(doc));
 				yyjson_mut_doc_free(doc);
 			}
