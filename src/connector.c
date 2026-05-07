@@ -1527,9 +1527,13 @@ retry:
 	/* The bulk of the messages will be json messages to send to clients
 	 * so look for them first. */
 	if (likely(buf[0] == '{')) {
-		json_t *val = json_loads(buf, JSON_DISABLE_EOF_CHECK, NULL);
+		yyjson_doc *sdoc = yyjson_read(buf, strlen(buf), YYJSON_READ_STOP_WHEN_DONE);
 
-		ckmsgq_add(cdata->cmpq, val);
+		if (likely(sdoc)) {
+			yyjson_mut_doc *doc = yyjson_doc_mut_copy(sdoc, NULL);
+			yyjson_doc_free(sdoc);
+			ckmsgq_add(cdata->cympq, doc);
+		}
 	} else if (cmdmatch(buf, "dropclient")) {
 		client_instance_t *client;
 
