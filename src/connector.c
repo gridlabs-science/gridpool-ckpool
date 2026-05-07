@@ -143,8 +143,7 @@ struct connector_data {
 
 	int64_t client_ids;
 
-	/* client message process queues */
-	ckmsgq_t *cmpq;
+	/* client yyjson message process queue */
 	ckmsgq_t *cympq;
 
 	/* client message event process queue */
@@ -1337,34 +1336,6 @@ out:
 	return ret;
 }
 
-static void client_message_processor(ckpool_t *ckp, json_t *json_msg)
-{
-	cdata_t *cdata = ckp->cdata;
-	client_instance_t *client;
-	int64_t client_id;
-
-	/* Extract the client id from the json message and remove its entry */
-	client_id = json_integer_value(json_object_get(json_msg, "client_id"));
-	json_object_del(json_msg, "client_id");
-	/* Put client_id back in for a passthrough subclient, passing its
-	 * upstream client_id instead of the passthrough's. */
-	if (subclient(client_id))
-		json_object_set_new_nocheck(json_msg, "client_id", json_integer(client_id & 0xffffffffll));
-
-	/* Flag redirector clients once they've been authorised */
-	if (ckp->redirector && (client = ref_client_by_id(cdata, client_id))) {
-		if (!client->redirected && !client->authorised) {
-			json_t *method_val = json_object_get(json_msg, "node.method");
-			const char *method = json_string_value(method_val);
-
-			if (!safecmp(method, stratum_msgs[SM_AUTHRESULT]))
-				client->authorised = true;
-		}
-		dec_instance_ref(cdata, client);
-	}
-	send_client_json(ckp, cdata, client_id, json_msg);
-}
-
 static void client_yymessage_processor(ckpool_t *ckp, yyjson_mut_doc *doc)
 {
 	cdata_t *cdata = ckp->cdata;
@@ -1397,8 +1368,11 @@ static void client_yymessage_processor(ckpool_t *ckp, yyjson_mut_doc *doc)
 void connector_add_message(ckpool_t *ckp, json_t *val)
 {
 	cdata_t *cdata = ckp->cdata;
+	yyjson_mut_doc *doc = json_to_yyjson(val);
 
-	ckmsgq_add(cdata->cmpq, val);
+	json_decref(val);
+	if (likely(doc))
+		ckmsgq_add(cdata->cympq, doc);
 }
 
 void connector_add_yymessage(ckpool_t *ckp, yyjson_mut_doc *doc)
@@ -1719,7 +1693,6 @@ void *connector(void *arg)
 	if (tries)
 		LOGWARNING("Connector successfully bound to socket");
 
-	cdata->cmpq = create_ckmsgq(ckp, "cmpq", &client_message_processor);
 	cdata->cympq = create_ckmsgq(ckp, "cympq", &client_yymessage_processor);
 
 	if (ckp->remote && !setup_upstream(ckp, cdata))
