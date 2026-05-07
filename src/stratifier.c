@@ -7826,13 +7826,6 @@ static void discard_json_params(json_params_t *jp)
 	free(jp);
 }
 
-static void steal_json_id(json_t *val, json_params_t *jp)
-{
-	/* Steal the id_val as is to avoid a copy */
-	json_object_set_new_nocheck(val, "id", jp->id_val);
-	jp->id_val = NULL;
-}
-
 static void sshare_process(ckpool_t *ckp, json_params_t *jp)
 {
 	enum share_err err_code = SE_NONE;
@@ -8005,15 +7998,15 @@ static int transactions_by_jobid(sdata_t *sdata, const int64_t id)
 	return ret;
 }
 
-static json_t *txnhashes_by_jobid(sdata_t *sdata, const int64_t id)
+static char *txnhashes_by_jobid(sdata_t *sdata, const int64_t id)
 {
-	json_t *ret = NULL;
+	char *ret = NULL;
 	workbase_t *wb;
 
 	ck_rlock(&sdata->workbase_lock);
 	HASH_FIND_I64(sdata->workbases, &id, wb);
 	if (wb)
-		ret = json_string(wb->txn_hashes);
+		ret = strdup(wb->txn_hashes);
 	ck_runlock(&sdata->workbase_lock);
 
 	return ret;
@@ -8021,20 +8014,30 @@ static json_t *txnhashes_by_jobid(sdata_t *sdata, const int64_t id)
 
 static void send_transactions(ckpool_t *ckp, json_params_t *jp)
 {
-	const char *msg = json_string_value(jp->method),
-		*params = json_string_value(json_array_get(jp->params, 0));
+	const char *msg = yyjson_mut_get_str(jp->yymethod),
+		*params = yyjson_mut_get_str(yyjson_mut_arr_get(jp->yyparams, 0));
 	stratum_instance_t *client = NULL;
+	yyjson_mut_val *root, *newid_val;
+	yyjson_mut_doc *doc;
 	sdata_t *sdata = ckp->sdata;
-	json_t *val, *hashes;
 	int64_t job_id = 0;
+	char *hashes;
 	time_t now_t;
 
 	if (unlikely(!msg || !strlen(msg))) {
 		LOGWARNING("send_transactions received null method");
 		goto out;
 	}
-	val = json_object();
-	steal_json_id(val, jp);
+
+	client = ref_instance_by_id(sdata, jp->client_id);
+	if (unlikely(!client)) {
+		LOGINFO("send_transactions failed to find client id %"PRId64" in hashtable!",
+			jp->client_id);
+		goto out;
+	}
+
+	doc = yyjson_mut_doc_new(NULL);
+	newid_val = yyjson_mut_val_mut_copy(doc, jp->yyid_val);
 	if (cmdmatch(msg, "mining.get_transactions")) {
 		int txns;
 
@@ -8048,45 +8051,58 @@ static void send_transactions(ckpool_t *ckp, json_params_t *jp)
 			sscanf(msg, "mining.get_transactions(%lx", &job_id);
 		txns = transactions_by_jobid(sdata, job_id);
 		if (txns != -1) {
-			json_set_int(val, "result", txns);
-			json_object_set_new_nocheck(val, "error", json_null());
-		} else
-			json_set_string(val, "error", "Invalid job_id");
+			root = yyjson_mut_pack_val(doc, "{sIsnso}",
+			      "result", txns,
+			      "error",
+			      "id", newid_val);
+		} else {
+			root = yyjson_mut_pack_val(doc, "{ssso}",
+			      "error", "Invalid job_id",
+			      "id", newid_val);
+		}
 		goto out_send;
 	}
 	if (!cmdmatch(msg, "mining.get_txnhashes")) {
 		LOGDEBUG("Unhandled mining get request: %s", msg);
-		json_set_string(val, "error", "Unhandled");
+		root = yyjson_mut_pack_val(doc, "{ssso}",
+					   "error", "Unhandled",
+					   "id", newid_val);
 		goto out_send;
-	}
-
-	client = ref_instance_by_id(sdata, jp->client_id);
-	if (unlikely(!client)) {
-		LOGINFO("send_transactions failed to find client id %"PRId64" in hashtable!",
-			jp->client_id);
-		goto out;
 	}
 
 	now_t = time(NULL);
 	if (now_t - client->last_txns < ckp->update_interval) {
 		LOGNOTICE("Rate limiting get_txnhashes on client %"PRId64"!", jp->client_id);
-		json_set_string(val, "error", "Ratelimit");
+			root = yyjson_mut_pack_val(doc, "{ssso}",
+			      "error", "Ratelimit",
+			      "id", newid_val);
 		goto out_send;
 	}
 	client->last_txns = now_t;
 	if (!params || !strlen(params)) {
-		json_set_string(val, "error", "Invalid params");
+			root = yyjson_mut_pack_val(doc, "{ssso}",
+			      "error", "Invalid params",
+			      "id", newid_val);
 		goto out_send;
 	}
 	sscanf(params, "%lx", &job_id);
+
+	/* Returns a copy of the hashes, needs to be released */
 	hashes = txnhashes_by_jobid(sdata, job_id);
 	if (hashes) {
-		json_object_set_new_nocheck(val, "result", hashes);
-		json_object_set_new_nocheck(val, "error", json_null());
-	} else
-		json_set_string(val, "error", "Invalid job_id");
+		root = yyjson_mut_pack_val(doc, "{sssnso}",
+					   "result", hashes,
+					   "error",
+					   "id", newid_val);
+		free(hashes);
+	} else {
+		root = yyjson_mut_pack_val(doc, "{ssso}",
+		      "error", "Invalid job_id",
+		      "id", newid_val);
+	}
 out_send:
-	stratum_add_send(sdata, val, jp->client_id, SM_TXNSRESULT);
+	yyjson_mut_doc_set_root(doc, root);
+	stratum_add_yysend(sdata, doc, jp->client_id, SM_TXNSRESULT);
 out:
 	if (client)
 		dec_instance_ref(sdata, client);
