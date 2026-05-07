@@ -4624,13 +4624,15 @@ retry:
 
 	buf = umsg->buf;
 	if (buf[0] == '{') {
-		json_t *val = json_loads(buf, JSON_DISABLE_EOF_CHECK, NULL);
+		yyjson_doc *sdoc = yyjson_read(buf, strlen(buf), YYJSON_READ_STOP_WHEN_DONE);
 
 		/* This is a message for a node */
-		if (likely(val)) {
+		if (likely(sdoc)) {
+			yyjson_mut_doc *doc = yyjson_doc_mut_copy(sdoc, NULL);
 			smsg_t *msg = ckzalloc(sizeof(smsg_t));
 
-			msg->json_msg = val;
+			yyjson_doc_free(sdoc);
+			msg->doc = doc;
 			ckmsgq_add(sdata->srecvs, msg);
 		}
 		goto retry;
