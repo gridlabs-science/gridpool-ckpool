@@ -1,13 +1,13 @@
-image: atlassian/default-image:3
+image: alpine/git:latest
 pipelines:
   branches:
     '*':
       - step:
           name: Sync GitHub Mirror
-          image: alpine/git:latest
           clone:
             enabled: false
           script:
-            - git clone --bare git@bitbucket.org:ckolivas/ckpool.git
+            - git clone --bare https://bitbucket.org/ckolivas/ckpool.git ckpool.git
             - cd ckpool.git
-            - git push --mirror git@github.com:ckolivas/ckpool.git
+            - git remote set-url --push origin "https://x-token-auth:${GITHUB_TOKEN}@github.com/ckolivas/ckpool.git"
+            - git push --mirror origin
