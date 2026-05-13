@@ -7,9 +7,37 @@
  * any later version.  See COPYING for more details.
  */
 
-#include "yyjson.h"
 #include <stdarg.h>
 #include <jansson.h>
+#include "libckpool.h"
+#include "yyjson.h"
+
+/* yyjson custom allocator using ckalloc */
+static void *ck_yyjson_malloc(void *ctx, size_t size)
+{
+	(void)ctx;
+	return ckalloc(size);
+}
+
+static void *ck_yyjson_realloc(void *ctx, void *ptr, size_t old_size, size_t size)
+{
+	(void)ctx;
+	(void)old_size;   /* ckpool's ckrealloc doesn't need the old size */
+	return ckrealloc(ptr, size);
+}
+
+static void ck_yyjson_free(void *ctx, void *ptr)
+{
+	(void)ctx;
+	free(ptr);
+}
+
+const yyjson_alc ckyyalc = {
+	.malloc  = ck_yyjson_malloc,
+	.realloc = ck_yyjson_realloc,
+	.free    = ck_yyjson_free,
+	.ctx     = NULL
+};
 
 static void yyjson_mut_pack_skip(const char **pp)
 {
