@@ -168,7 +168,7 @@ yyjson_mut_doc *yyjson_mut_pack(const char *fmt, ...)
 	if (!fmt || !*fmt)
 		return NULL;
 
-	yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
+	yyjson_mut_doc *doc = yyjson_mut_doc_new(&ckyyalc);
 	if (!doc)
 		return NULL;
 
@@ -227,7 +227,7 @@ yyjson_mut_doc *json_to_yyjson(json_t *json)
 
 	doc = yyjson_read(s, strlen(s), 0);
 	free(s);
-	mut_doc = yyjson_doc_mut_copy(doc, NULL);
+	mut_doc = yyjson_doc_mut_copy(doc, &ckyyalc);
 	yyjson_doc_free(doc);
 	return mut_doc;
 }
