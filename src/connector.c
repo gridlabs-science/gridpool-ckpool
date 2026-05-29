@@ -294,7 +294,7 @@ static int accept_client(cdata_t *cdata, const int epfd, const uint64_t server)
 		/* Handle these errors gracefully should we ever share this
 		 * socket */
 		if (errno == EAGAIN || errno == EWOULDBLOCK || errno == ECONNABORTED) {
-			LOGERR("Recoverable error on accept in accept_client");
+			LOGNOTICE("Recoverable error on accept in accept_client");
 			return 0;
 		}
 		LOGERR("Failed to accept on socket %d in acceptor", sockd);
