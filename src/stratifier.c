@@ -1179,6 +1179,11 @@ static bool add_txn(ckpool_t *ckp, sdata_t *sdata, txntable_t **txns, const char
 	bool found = false;
 	txntable_t *txn;
 
+	/* Don't waste our time with a transaction hashlist if we don't have
+	 * any trusted or node servers configured */
+	if (!ckp->trusted && !ckp->nodeserver)
+		return found;
+
 	/* Look for transactions we already know about and increment their
 	 * refcount if we're still using them. */
 	ck_wlock(&sdata->txn_lock);
