@@ -1203,6 +1203,8 @@ static bool connect_upstream(ckpool_t *ckp, connsock_t *cs)
 		   cs->url, cs->port);
 	ret = true;
 out:
+	if (val)
+		json_decref(val);
 	cksem_post(&cs->sem);
 
 	return ret;
