@@ -1104,10 +1104,17 @@ static void send_client(ckpool_t *ckp, cdata_t *cdata, const int64_t id, char *b
 		redirect_client(ckp, client);
 }
 
-static void send_client_yyjson(ckpool_t *ckp, cdata_t *cdata, int64_t client_id, yyjson_mut_doc *doc)
+static void
+_send_client_yyjson(ckpool_t *ckp, cdata_t *cdata, int64_t client_id, yyjson_mut_doc *doc,
+		    const char *file, const char *func, const int line)
 {
 	client_instance_t *client;
 	char *msg;
+
+	if (unlikely(!doc)) {
+		LOGWARNING("_send_client_yyjson received NULL doc from %s %s:%d", file, func, line);
+		return;
+	}
 
 	if (ckp->node && (client = ref_client_by_id(cdata, client_id))) {
 		yyjson_mut_doc *tmp_doc = yyjson_mut_doc_mut_copy(doc, &ckyyalc);
@@ -1123,6 +1130,9 @@ static void send_client_yyjson(ckpool_t *ckp, cdata_t *cdata, int64_t client_id,
 	send_client(ckp, cdata, client_id, msg);
 	yyjson_mut_doc_free(doc);
 }
+
+#define send_client_yyjson(ckp, cdata, client_id, doc) \
+	_send_client_yyjson(ckp, cdata, client_id, doc, __FILE__, __func__, __LINE__)
 
 /* When testing if a client exists, passthrough clients don't exist when their
  * parent no longer exists. */
