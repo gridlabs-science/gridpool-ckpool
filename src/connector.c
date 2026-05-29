@@ -1357,9 +1357,14 @@ static void client_yymessage_processor(ckpool_t *ckp, yyjson_mut_doc *doc)
 {
 	cdata_t *cdata = ckp->cdata;
 	client_instance_t *client;
-	yyjson_mut_val *root = yyjson_mut_doc_get_root(doc);
+	yyjson_mut_val *root;
 	int64_t client_id;
 
+	if (unlikely(!doc)) {
+		LOGWARNING("client_yymessage_processor received NULL doc");
+		return;
+	}
+	root = yyjson_mut_doc_get_root(doc);
 	/* Extract the client id from the json message and remove its entry */
 	client_id = yyjson_mut_get_num(yyjson_mut_obj_get(root, "client_id"));
 	yyjson_mut_obj_remove_key(root, "client_id");
@@ -1392,9 +1397,16 @@ void connector_add_message(ckpool_t *ckp, json_t *val)
 		ckmsgq_add(cdata->cympq, doc);
 }
 
-void connector_add_yymessage(ckpool_t *ckp, yyjson_mut_doc *doc)
+void _connector_add_yymessage(ckpool_t *ckp, yyjson_mut_doc *doc, const char *file,
+			     const char *func, const int line)
 {
 	cdata_t *cdata = ckp->cdata;
+
+	if (unlikely(!doc)) {
+		LOGWARNING("_connector_add_yymessage received NULL doc from %s %s:%d",
+			   file, func, line);
+		return;
+	}
 
 	ckmsgq_add(cdata->cympq, doc);
 }
