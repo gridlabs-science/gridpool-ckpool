@@ -7705,10 +7705,10 @@ static void srecv_process(ckpool_t *ckp, smsg_t *msg)
 {
 	char address[INET6_ADDRSTRLEN], *buf = NULL;
 	bool noid = false, dropped = false;
-	yyjson_mut_doc *doc = msg->doc;
 	yyjson_mut_val *root, *val;
 	sdata_t *sdata = ckp->sdata;
 	stratum_instance_t *client;
+	yyjson_mut_doc *doc;
 	int server;
 
 	if (unlikely(!msg)) {
@@ -7716,10 +7716,17 @@ static void srecv_process(ckpool_t *ckp, smsg_t *msg)
 		return;
 	}
 
-	/* Temporary cludge to receive yyjson */
-	if (!doc)
-		doc = msg->doc = json_to_yyjson(msg->json_msg);
+	doc = msg->doc;
+	if (unlikely(!doc)) {
+		LOGWARNING("srecv_process received NULL doc!");
+		goto out;
+	}
+
 	root = yyjson_mut_doc_get_root(doc);
+	if (unlikely(!root)) {
+		LOGWARNING("srecv_process received NULL root!");
+		goto out;
+	}
 
 	val = yyjson_mut_obj_get(root, "client_id");
 	if (unlikely(!val)) {
@@ -7789,21 +7796,6 @@ static void srecv_process(ckpool_t *ckp, smsg_t *msg)
 out:
 	free_smsg(msg);
 	free(buf);
-}
-
-void _stratifier_add_recv(ckpool_t *ckp, json_t *val, const char *file, const char *func, const int line)
-{
-	sdata_t *sdata;
-	smsg_t *msg;
-
-	if (unlikely(!val)) {
-		LOGWARNING("_stratifier_add_recv received NULL val from %s %s:%d", file, func, line);
-		return;
-	}
-	sdata = ckp->sdata;
-	msg = ckzalloc(sizeof(smsg_t));
-	msg->json_msg = val;
-	ckmsgq_add(sdata->srecvs, msg);
 }
 
 void _stratifier_add_yyrecv(ckpool_t *ckp, yyjson_mut_doc *doc, const char *file, const char *func, const int line)
