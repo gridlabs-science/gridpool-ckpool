@@ -624,6 +624,31 @@ static client_instance_t *ref_client_by_id(cdata_t *cdata, int64_t id)
 	return client;
 }
 
+static void add_remote_client(ckpool_t *ckp, cdata_t *cdata, int64_t id)
+{
+	client_instance_t *client;
+	yyjson_mut_doc *doc;
+	bool found = false;
+	char *buf;
+
+	ck_rlock(&cdata->lock);
+	HASH_FIND_I64(cdata->clients, &id, client);
+	if (likely(client)) {
+		found = true;
+		client->remote = true;
+	}
+	ck_runlock(&cdata->lock);
+
+	if (likely(found))
+		LOGWARNING("Added trusted remote client %ld", id);
+	else
+		LOGWARNING("Unable to find trusted remote client %ld", id);
+	doc = yyjson_mut_pack("{sb}", "result", found);
+	buf = yyjson_mut_write(doc, YYJSON_WRITE_NEWLINE_AT_END, NULL);
+	yyjson_mut_doc_free(doc);
+	send_client(ckp, cdata, id, buf);
+}
+
 static void redirect_client(ckpool_t *ckp, client_instance_t *client);
 
 static bool redirect_matches(cdata_t *cdata, client_instance_t *client)
@@ -1560,6 +1585,11 @@ retry:
 		sscanf(buf, "getxfd%d", &fdno);
 		if (fdno > -1 && fdno < ckp->serverurls)
 			send_fd(cdata->serverfd[fdno], umsg->sockd);
+	} else if (cmdmatch(buf, "remote")) {
+		int64_t client = -1;
+
+		sscanf(buf, "remote=%ld", &client);
+		add_remote_client(ckp, cdata, client);
 	} else
 		LOGWARNING("Unhandled connector message: %s", buf);
 	goto retry;
