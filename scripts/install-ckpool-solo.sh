@@ -227,6 +227,8 @@ blockmaxweight=3900000
 checkblocks=6
 blockreconstructionextratxn=1000
 dbcache=$dbcache
+minrelaytxfee=0.000001
+blockmintxfee=0.00001
 EOF
 
 # Install CKPool-Solo
