@@ -204,11 +204,11 @@ cd ..
 cp -r bitcoin-${BITCOIN_VERSION}/bin/* /usr/local/bin/
 rm -rf bitcoin-${BITCOIN_VERSION} ${BITCOIN_TAR} SHA256SUMS SHA256SUMS.asc
 
-# Calculate dbcache: 25% of total memory in MB, capped at 8192 MB
+# Calculate dbcache: 25% of total memory in MB, capped at 12000 MB
 total_mem=$(free -m | awk '/Mem:/ {print $2}')
 dbcache=$((total_mem * 25 / 100))
-if [ $dbcache -gt 8192 ]; then
-    dbcache=8192
+if [ $dbcache -gt 12000 ]; then
+    dbcache=12000
 fi
 
 # Set up Bitcoin Core config and datadir
