@@ -135,10 +135,13 @@ void logmsg(int loglevel, const char *fmt, ...)
 		fprintf(stderr, "%s", log);
 		goto out_free;
 	}
-	if (loglevel <= LOG_WARNING)
+	if (unlikely(loglevel <= LOG_WARNING))
 		ckmsgq_add(global_ckp->console_logger, strdup(log));
-	if (logfd > 0)
-		ckmsgq_add(global_ckp->logger, strdup(log));
+	if (likely(logfd > 0)) {
+		/* Hand log over to the ckmsgq to free */
+		ckmsgq_add(global_ckp->logger, log);
+		goto out;
+	}
 out_free:
 	free(log);
 out:
