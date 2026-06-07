@@ -4783,9 +4783,8 @@ retry:
 	goto retry;
 }
 
-static void *blockupdate(void *arg)
+static void *blockupdate(void __maybe_unused *arg)
 {
-	ckpool_t *ckp = (ckpool_t *)arg;
 	sdata_t *sdata = ckpool.sdata;
 	char hash[68];
 
@@ -8200,9 +8199,8 @@ static void lazy_drop_client(stratum_instance_t *client)
 	connector_drop_client(client->id);
 }
 
-static void *statsupdate(void *arg)
+static void *statsupdate(void __maybe_unused *arg)
 {
-	ckpool_t *ckp = (ckpool_t *)arg;
 	sdata_t *sdata = ckpool.sdata;
 	pool_stats_t *stats = &sdata->stats;
 
@@ -8693,9 +8691,8 @@ static void read_poolstats(int *tvsec_diff)
 
 static char *status_chars = "|/-\\";
 
-void *throbber(void *arg)
+void *throbber(void __maybe_unused *arg)
 {
-	ckpool_t *ckp = arg;
 	sdata_t *sdata = ckpool.sdata;
 	int counter = 0;
 
@@ -8734,10 +8731,9 @@ out:
 	return NULL;
 }
 
-static void *zmqnotify(void *arg)
+static void *zmqnotify(void __maybe_unused *arg)
 {
 #ifdef HAVE_ZMQ_H
-	ckpool_t *ckp = arg;
 	sdata_t *sdata = ckpool.sdata;
 	void *context, *notify;
 	int rc;

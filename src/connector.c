@@ -1252,7 +1252,7 @@ static void ping_upstream(cdata_t *cdata)
 	ckmsgq_add(cdata->upstream_sends, buf);
 }
 
-static void *urecv_process(void *arg)
+static void *urecv_process(void __maybe_unused *arg)
 {
 	cdata_t *cdata = ckpool.cdata;
 	connsock_t *cs = &cdata->upstream_cs;

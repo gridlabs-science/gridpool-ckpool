@@ -364,11 +364,6 @@ void _queue_proc(proc_instance_t *pi, const char *msg, const char *file, const c
 char *_send_recv_proc(const proc_instance_t *pi, const char *msg, int writetimeout, int readtimedout,
 		      const char *file, const char *func, const int line);
 #define send_recv_proc(pi, msg) _send_recv_proc(&(pi), msg, UNIX_WRITE_TIMEOUT, UNIX_READ_TIMEOUT, __FILE__, __func__, __LINE__)
-char *_send_recv_ckdb(const const char *msg, const char *file, const char *func, const int line);
-#define send_recv_ckdb(msg) _send_recv_ckdb(msg, __FILE__, __func__, __LINE__)
-char *_ckdb_msg_call(const const char *msg,  const char *file, const char *func,
-		     const int line);
-#define ckdb_msg_call(msg) _ckdb_msg_call(msg, __FILE__, __func__, __LINE__)
 
 yyjson_doc *yyjson_rpc_call(connsock_t *cs, const char *rpc_req);
 yyjson_doc *yyjson_rpc_response(connsock_t *cs, const char *rpc_req);

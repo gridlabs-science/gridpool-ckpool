@@ -1881,7 +1881,7 @@ static void add_json_msgq(cs_msg_t **csmsgq, proxy_instance_t *proxy, json_t **v
 }
 
 /* For processing and sending shares. proxy refers to parent proxy here */
-static void *proxy_send(void *arg)
+static void *proxy_send(void __maybe_unused *arg)
 {
 	gdata_t *gdata = ckpool.gdata;
 	stratum_msg_t *msg = NULL;
@@ -2484,7 +2484,7 @@ static void *proxy_recv(void *arg)
 }
 
 /* Thread that handles all received messages from user proxies */
-static void *userproxy_recv(void *arg)
+static void *userproxy_recv(void __maybe_unused *arg)
 {
 	gdata_t *gdata = ckpool.gdata;
 	struct epoll_event event;
@@ -3271,7 +3271,7 @@ out:
 
 /* Check which servers are alive, maintaining a connection with them and
  * reconnect if a higher priority one is available. */
-static void *server_watchdog(void *arg)
+static void *server_watchdog(void __maybe_unused *arg)
 {
 	gdata_t *gdata = ckpool.gdata;
 
