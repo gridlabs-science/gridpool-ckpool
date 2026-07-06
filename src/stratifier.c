@@ -8206,6 +8206,8 @@ static worker_instance_t *next_worker(sdata_t *sdata, user_instance_t *user, wor
 
 static void lazy_drop_client(stratum_instance_t *client)
 {
+	/* Updated unlocked, a race will only delay the dropping which is
+	 * harmless. */
 	client->dropped = true;
 	connector_drop_client(client->id);
 }
