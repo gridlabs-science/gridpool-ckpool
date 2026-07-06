@@ -3315,6 +3315,17 @@ static stratum_instance_t *__instance_by_id(sdata_t *sdata, const int64_t id)
 	return client;
 }
 
+static stratum_instance_t *instance_by_id(sdata_t *sdata, const int64_t id)
+{
+	stratum_instance_t *client;
+
+	ck_rlock(&sdata->instance_lock);
+	client = __instance_by_id(sdata, id);
+	ck_runlock(&sdata->instance_lock);
+
+	return client;
+}
+
 /* Increase the reference count of instance */
 static void __inc_instance_ref(stratum_instance_t *client)
 {
@@ -3458,7 +3469,7 @@ static stratum_instance_t *__stratum_add_instance(int64_t id, const char *addres
 	 * mode . */
 	client->sdata = sdata;
 	if ((pass_id = subclient(id))) {
-		stratum_instance_t *remote = __instance_by_id(sdata, pass_id);
+		stratum_instance_t *remote = instance_by_id(sdata, pass_id);
 
 		id &= 0xffffffffll;
 		if (remote && remote->node) {
