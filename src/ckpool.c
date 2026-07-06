@@ -368,6 +368,7 @@ static int pid_wait(const pid_t pid, const int ms)
 	return ret;
 }
 
+#if 0
 static void api_message(char **buf, int *sockd)
 {
 	apimsg_t *apimsg = ckalloc(sizeof(apimsg_t));
@@ -378,6 +379,7 @@ static void api_message(char **buf, int *sockd)
 	*sockd = -1;
 	ckmsgq_add(ckpool.ckpapi, apimsg);
 }
+#endif
 
 /* Listen for incoming global requests. Always returns a response if possible */
 static void *listener(void *arg)
@@ -401,9 +403,11 @@ retry:
 	if (!buf) {
 		LOGWARNING("Failed to get message in listener");
 		send_unix_msg(sockd, "failed");
+#if 0
 	} else if (buf[0] == '{') {
 		/* Any JSON messages received are for the RPC API to handle */
 		api_message(&buf, &sockd);
+#endif
 	} else if (cmdmatch(buf, "shutdown")) {
 		LOGWARNING("Listener received shutdown message, terminating ckpool");
 		send_unix_msg(sockd, "exiting");
