@@ -33,6 +33,7 @@
 #include "connector.h"
 
 ckpool_t ckpool;
+static volatile sig_atomic_t ckpool_shutdown;
 
 static bool open_logfile(void)
 {
@@ -391,7 +392,8 @@ retry:
 	dealloc(buf);
 	sockd = accept(us->sockd, NULL, NULL);
 	if (sockd < 0) {
-		LOGERR("Failed to accept on socket in listener");
+		if (!ckpool_shutdown)
+			LOGERR("Failed to accept on socket in listener");
 		goto out;
 	}
 
@@ -1074,23 +1076,15 @@ static void clean_up(void)
 	dealloc(ckpool.socket_dir);
 }
 
-static void cancel_pthread(pthread_t *pth)
-{
-	if (!pth || !*pth)
-		return;
-	pthread_cancel(*pth);
-	pth = NULL;
-}
-
 static void sighandler(const int sig)
 {
 	signal(sig, SIG_IGN);
 	signal(SIGTERM, SIG_IGN);
-	LOGWARNING("Process %s received signal %d, shutting down",
-		   ckpool.name, sig);
-
-	cancel_pthread(&ckpool.pth_listener);
-	exit(0);
+	ckpool_shutdown = sig;
+	/* Interrupt the blocking accept() in listener() without calling any
+	 * non-async-signal-safe functions. main() logs and cleans up after
+	 * join_pthread returns. */
+	shutdown(ckpool.main.us.sockd, SHUT_RDWR);
 }
 
 static bool _json_get_string(char **store, const json_t *entry, const char *res)
@@ -1894,6 +1888,9 @@ int main(int argc, char **argv)
 	/* Shutdown from here if the listener is sent a shutdown message */
 	if (ckpool.pth_listener)
 		join_pthread(ckpool.pth_listener);
+
+	if (ckpool_shutdown)
+		LOGWARNING("Process %s received signal %d, shutting down", ckpool.name, (int)ckpool_shutdown);
 
 	clean_up();
 
