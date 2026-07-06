@@ -629,13 +629,13 @@ static void add_remote_client(cdata_t *cdata, int64_t id)
 	bool found = false;
 	char *buf;
 
-	ck_rlock(&cdata->lock);
+	ck_wlock(&cdata->lock);
 	HASH_FIND_I64(cdata->clients, &id, client);
 	if (likely(client)) {
 		found = true;
 		client->remote = true;
 	}
-	ck_runlock(&cdata->lock);
+	ck_wunlock(&cdata->lock);
 
 	if (likely(found))
 		LOGWARNING("Added trusted remote client %ld", id);
