@@ -236,7 +236,12 @@ static client_instance_t *recruit_client(cdata_t *cdata)
 
 static void __recycle_client(cdata_t *cdata, client_instance_t *client)
 {
+	share_t *share, *tmp;
+
 	dealloc(client->buf);
+	DL_FOREACH_SAFE(client->shares, share, tmp)
+	    dealloc(share);
+
 	memset(client, 0, sizeof(client_instance_t));
 	client->id = -1;
 	DL_APPEND2(cdata->recycled_clients, client, recycled_prev, recycled_next);
