@@ -472,7 +472,7 @@ char *get_txn(connsock_t *cs, const char *hash)
 	root = yyjson_doc_get_root(doc);
 	if (unlikely(!root)) {
 		LOGERR("Failed to get json root in response to get_txn");
-		goto out;
+		goto out_free;
 	}
 	res_val = yyjson_obj_get(root, "result");
 	if (res_val && !yyjson_is_null(res_val) && yyjson_is_str(res_val)) {
@@ -480,6 +480,7 @@ char *get_txn(connsock_t *cs, const char *hash)
 		LOGDEBUG("get_txn for hash %s got data %s", hash, ret);
 	} else
 		LOGDEBUG("get_txn did not retrieve data for hash %s", hash);
+out_free:
 	yyjson_doc_free(doc);
 out:
 	return ret;
