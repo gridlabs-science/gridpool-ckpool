@@ -1665,6 +1665,7 @@ static void request_txns(sdata_t *sdata, json_t *txns)
 		json_set_string(val, "method", stratum_msgs[SM_REQTXNS]);
 		downstream_json(sdata, val, 0, SSEND_APPEND);
 	}
+	json_decref(val);
 }
 
 /* Rebuilds transactions from txnhashes to be able to construct wb_merkle_bins
