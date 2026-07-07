@@ -6369,8 +6369,12 @@ out_nowb:
 		} else
 			LOGERR("Failed to fopen %s", fname);
 	}
-	if (ckpool.remote)
-		upstream_json_msgtype(yyjson_to_json(doc), SM_SHARE);
+	if (ckpool.remote) {
+		json_t *share_val = yyjson_to_json(doc);
+
+		upstream_json_msgtype(share_val, SM_SHARE);
+		json_decref(share_val);
+	}
 	yyjson_mut_doc_free(doc);
 out:
 	if (!sdata->wbincomplete && ((!result && !submit) || !share)) {
