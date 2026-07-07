@@ -937,15 +937,16 @@ bool _send_json_msg(connsock_t *cs, const json_t *json_msg, const char *file, co
 	len = strlen(s);
 	if (unlikely(!len)) {
 		LOGWARNING("Zero length string in send_json_msg from %s %s:%d", file, func, line);
-		goto out;
+		goto out_free;
 	}
 	sent = write_socket(cs->fd, s, len);
-	dealloc(s);
 	if (sent != len) {
 		LOGNOTICE("Failed to send %d bytes sent %d in send_json_msg", len, sent);
-		goto out;
+		goto out_free;
 	}
 	ret = true;
+out_free:
+	dealloc(s);
 out:
 	return ret;
 }
