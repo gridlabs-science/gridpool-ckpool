@@ -1418,8 +1418,8 @@ out:
 static void parse_config(void)
 {
 	json_t *json_conf, *arr_val;
+	char *url, *vmask = NULL;
 	json_error_t err_val;
-	char *url, *vmask;
 	int arr_size;
 
 	json_conf = json_load_file(ckpool.config, JSON_DISABLE_EOF_CHECK, &err_val);
@@ -1449,6 +1449,7 @@ static void parse_config(void)
 		sscanf(vmask, "%x", &ckpool.version_mask);
 	else
 		ckpool.version_mask = 0x1fffe000;
+	dealloc(vmask);
 
 	/* Default don't drop idle clients */
 	json_get_int(&ckpool.dropidle, json_conf, "dropidle");
