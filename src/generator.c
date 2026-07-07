@@ -1157,6 +1157,7 @@ static void store_proxy(gdata_t *gdata, proxy_instance_t *proxy)
 	dealloc(proxy->baseurl);
 	dealloc(proxy->auth);
 	dealloc(proxy->pass);
+	dealloc(proxy->enonce1bin);
 	memset(proxy, 0, sizeof(proxy_instance_t));
 	DL_APPEND(gdata->dead_proxies, proxy);
 	mutex_unlock(&gdata->lock);
