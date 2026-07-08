@@ -6437,21 +6437,17 @@ out:
 /* Must enter with workbase_lock held */
 static yyjson_mut_doc *__stratum_notify(const workbase_t *wb, const bool clean)
 {
-	yyjson_mut_doc *doc, *merkle_doc;
-	yyjson_mut_val *merkle_root, *merkle_copy, *root;
+	yyjson_mut_doc *doc;
+	yyjson_mut_val *root;
 
 	doc = yyjson_mut_doc_new(&ckyyalc);
-	merkle_doc = yyjson_mut_doc_mut_copy(wb->yymerkle_doc, &ckyyalc);
-	merkle_root = yyjson_mut_doc_get_root(merkle_doc);
-	merkle_copy = yyjson_mut_val_mut_copy(doc, merkle_root);
-
 	root = yyjson_mut_pack_val(doc, "{s:[ssssosssb],s:n,s:s}",
 		"params",
 		wb->idstring,
 		wb->prevhash,
 		wb->coinb1,
 		wb->coinb2,
-		merkle_copy,
+		yyjson_mut_doc_get_root(wb->yymerkle_doc),
 		wb->bbversion,
 		wb->nbit,
 		wb->ntime,
@@ -6459,7 +6455,6 @@ static yyjson_mut_doc *__stratum_notify(const workbase_t *wb, const bool clean)
 		"id",
 		"method", "mining.notify");
 	yyjson_mut_doc_set_root(doc, root);
-	yyjson_mut_doc_free(merkle_doc);
 	return doc;
 }
 
@@ -6499,8 +6494,8 @@ static yyjson_mut_doc *__user_notify(const workbase_t *wb, const user_instance_t
 {
 	int64_t id = wb->id;
 	struct userwb *userwb;
-	yyjson_mut_doc *doc, *merkle_doc;
-	yyjson_mut_val *merkle_root, *merkle_copy, *root;
+	yyjson_mut_doc *doc;
+	yyjson_mut_val *root;
 
 	HASH_FIND_I64(user->userwbs, &id, userwb);
 	if (unlikely(!userwb)) {
@@ -6509,17 +6504,13 @@ static yyjson_mut_doc *__user_notify(const workbase_t *wb, const user_instance_t
 	}
 
 	doc = yyjson_mut_doc_new(&ckyyalc);
-	merkle_doc = yyjson_mut_doc_mut_copy(wb->yymerkle_doc, &ckyyalc);
-	merkle_root = yyjson_mut_doc_get_root(merkle_doc);
-	merkle_copy = yyjson_mut_val_mut_copy(doc, merkle_root);
-
 	root = yyjson_mut_pack_val(doc, "{s:[ssssosssb],s:n,s:s}",
 		"params",
 		wb->idstring,
 		wb->prevhash,
 		wb->coinb1,
 		userwb->coinb2,
-		merkle_copy,
+		yyjson_mut_doc_get_root(wb->yymerkle_doc),
 		wb->bbversion,
 		wb->nbit,
 		wb->ntime,
@@ -6527,7 +6518,6 @@ static yyjson_mut_doc *__user_notify(const workbase_t *wb, const user_instance_t
 		"id",
 		"method", "mining.notify");
 	yyjson_mut_doc_set_root(doc, root);
-	yyjson_mut_doc_free(merkle_doc);
 	return doc;
 }
 
@@ -6558,7 +6548,7 @@ static void stratum_broadcast_updates(sdata_t *sdata, bool clean)
 	ck_wunlock(&sdata->instance_lock);
 }
 
-static void send_yyjson_err(sdata_t *sdata, const int64_t client_id, yyjson_mut_doc *sdoc,
+static void send_yyjson_err(sdata_t *sdata, const int64_t client_id,
 			    yyjson_mut_val *id_val, const char *err_msg)
 {
 	yyjson_mut_doc *doc;
@@ -6566,19 +6556,8 @@ static void send_yyjson_err(sdata_t *sdata, const int64_t client_id, yyjson_mut_
 	/* Some clients have no id_val so pass back an empty string. */
 	if (unlikely(!id_val))
 		doc = yyjson_mut_pack("{ssss}", "id", "", "error", err_msg);
-	else {
-		yyjson_mut_doc *tmpdoc;
-		yyjson_mut_val *val, *root, *tmproot;
-
-		doc = yyjson_mut_doc_new(&ckyyalc);
-		tmpdoc = yyjson_mut_doc_mut_copy(sdoc, &ckyyalc);
-		tmproot = yyjson_mut_doc_get_root(tmpdoc);
-		val = yyjson_mut_val_mut_copy(doc, tmproot);
-
-		root = yyjson_mut_pack_val(doc, "{soss}", "id", val, "error", err_msg);
-		yyjson_mut_doc_set_root(doc, root);
-		yyjson_mut_doc_free(tmpdoc);
-	}
+	else
+		doc = yyjson_mut_pack("{soss}", "id", id_val, "error", err_msg);
 	stratum_add_yysend(sdata, doc, client_id, SM_ERROR);
 }
 
@@ -6781,7 +6760,7 @@ static void parse_method(sdata_t *sdata, stratum_instance_t *client,
 
 	if (cmdmatch(method, "mining.subscribe")) {
 		yyjson_mut_doc *doc, *result_doc;
-		yyjson_mut_val *result_root, *result_val, *newid_val, *root;
+		yyjson_mut_val *root;
 
 		if (unlikely(client->subscribed)) {
 			LOGNOTICE("Client %s %s trying to subscribe twice",
@@ -6795,16 +6774,12 @@ static void parse_method(sdata_t *sdata, stratum_instance_t *client,
 			return;
 		}
 
-		result_root = yyjson_mut_doc_get_root(result_doc);
 		doc = yyjson_mut_doc_new(&ckyyalc);
-		result_val = yyjson_mut_val_mut_copy(doc, result_root);
-		newid_val = yyjson_mut_val_mut_copy(doc, id_val);
-		yyjson_mut_doc_free(result_doc);
-
 		root = yyjson_mut_pack_val(doc, "{sososn}",
-			"result", result_val,
-			"id", newid_val,
+			"result", yyjson_mut_doc_get_root(result_doc),
+			"id", id_val,
 			"error");
+		yyjson_mut_doc_free(result_doc);
 		yyjson_mut_doc_set_root(doc, root);
 
 		stratum_add_yysend(sdata, doc, client_id, SM_SUBSCRIBERESULT);
@@ -6888,7 +6863,7 @@ static void parse_method(sdata_t *sdata, stratum_instance_t *client,
 
         if (cmdmatch(method, "mining.configure")) {
 		yyjson_mut_doc *doc;
-		yyjson_mut_val *root, *newid_val;
+		yyjson_mut_val *root;
 
 		char version_str[12];
 
@@ -6897,13 +6872,11 @@ static void parse_method(sdata_t *sdata, stratum_instance_t *client,
 		sprintf(version_str, "%08x", ckpool.version_mask);
 
 		doc = yyjson_mut_doc_new(&ckyyalc);
-		newid_val = yyjson_mut_val_mut_copy(doc, id_val);
-
 		root = yyjson_mut_pack_val(doc, "{s{sbss}sosn}",
 			"result",
 			"version-rolling", true,
 			"version-rolling.mask", version_str,
-			"id", newid_val,
+			"id", id_val,
 			"error");
 		yyjson_mut_doc_set_root(doc, root);
 
@@ -7149,18 +7122,18 @@ static void send_yyauth_response(sdata_t *sdata, const int64_t client_id, const 
 				 yyjson_mut_val *id_val, yyjson_mut_val *err_val)
 {
 	yyjson_mut_doc *doc = yyjson_mut_doc_new(&ckyyalc);
-	yyjson_mut_val *root, *newid_val, *newerr_val;
+	yyjson_mut_val *root;
 
 	if (!err_val)
-		newerr_val = yyjson_mut_null(doc);
+		root = yyjson_mut_pack_val(doc, "{sbsnso}",
+			"result", ret,
+			"error",
+			"id", id_val);
 	else
-		newerr_val = yyjson_mut_val_mut_copy(doc, err_val);
-	newid_val = yyjson_mut_val_mut_copy(doc, id_val);
-
-	root = yyjson_mut_pack_val(doc, "{sbsoso}",
-		"result", ret,
-		"error", newerr_val,
-		"id", newid_val);
+		root = yyjson_mut_pack_val(doc, "{sbsoso}",
+			"result", ret,
+			"error", err_val,
+			"id", id_val);
 	yyjson_mut_doc_set_root(doc, root);
 	stratum_add_yysend(sdata, doc, client_id, SM_AUTHRESULT);
 }
@@ -7680,16 +7653,16 @@ static void parse_instance_msg(sdata_t *sdata, smsg_t *msg, stratum_instance_t *
 					 result ? result : "", client->identity);
 			return;
 		}
-		send_yyjson_err(sdata, client_id, doc, id_val, "-3:method not found");
+		send_yyjson_err(sdata, client_id, id_val, "-3:method not found");
 		return;
 	}
 	if (unlikely(!yyjson_mut_is_str(method))) {
-		send_yyjson_err(sdata, client_id, doc, id_val, "-1:method is not string");
+		send_yyjson_err(sdata, client_id, id_val, "-1:method is not string");
 		return;
 	}
 	params = yyjson_mut_obj_get(root, "params");
 	if (unlikely(!params)) {
-		send_yyjson_err(sdata, client_id, doc, id_val, "-1:params not found");
+		send_yyjson_err(sdata, client_id, id_val, "-1:params not found");
 		return;
 	}
 
@@ -7861,9 +7834,9 @@ static void discard_json_params(json_params_t *jp)
 static void sshare_process(json_params_t *jp)
 {
 	enum share_err err_code = SE_NONE;
-	yyjson_mut_val *root, *newid_val;
 	stratum_instance_t *client;
 	sdata_t *sdata = ckpool.sdata;
+	yyjson_mut_val *root;
 	yyjson_mut_doc *doc;
 	int64_t client_id;
 	bool result;
@@ -7881,19 +7854,18 @@ static void sshare_process(json_params_t *jp)
 	}
 	result = parse_submit(client, jp->yyparams, &err_code);
 	doc = yyjson_mut_doc_new(&ckyyalc);
-	newid_val = yyjson_mut_val_mut_copy(doc, jp->yyid_val);
 	if (err_code != SE_NONE) {
 		root = yyjson_mut_pack_val(doc, "{sns[isn]so}",
 			"result",
 			"error",
 			SHARE_ERR_CODE(err_code),
 			SHARE_ERR(err_code),
-			"id", newid_val);
+			"id", jp->yyid_val);
 	} else {
 		root = yyjson_mut_pack_val(doc, "{sbsnso}",
 			"result", result,
 			"error",
-			"id", newid_val);
+			"id", jp->yyid_val);
 	}
 	yyjson_mut_doc_set_root(doc, root);
 	stratum_add_yysend(sdata, doc, client_id, SM_SHARERESULT);
@@ -8049,7 +8021,7 @@ static void send_transactions(json_params_t *jp)
 	const char *msg = yyjson_mut_get_str(jp->yymethod),
 		*params = yyjson_mut_get_str(yyjson_mut_arr_get(jp->yyparams, 0));
 	stratum_instance_t *client = NULL;
-	yyjson_mut_val *root, *newid_val;
+	yyjson_mut_val *root;
 	yyjson_mut_doc *doc;
 	sdata_t *sdata = ckpool.sdata;
 	int64_t job_id = 0;
@@ -8069,7 +8041,6 @@ static void send_transactions(json_params_t *jp)
 	}
 
 	doc = yyjson_mut_doc_new(&ckyyalc);
-	newid_val = yyjson_mut_val_mut_copy(doc, jp->yyid_val);
 	if (cmdmatch(msg, "mining.get_transactions")) {
 		int txns;
 
@@ -8086,11 +8057,11 @@ static void send_transactions(json_params_t *jp)
 			root = yyjson_mut_pack_val(doc, "{sIsnso}",
 			      "result", txns,
 			      "error",
-			      "id", newid_val);
+			      "id", jp->yyid_val);
 		} else {
 			root = yyjson_mut_pack_val(doc, "{ssso}",
 			      "error", "Invalid job_id",
-			      "id", newid_val);
+			      "id", jp->yyid_val);
 		}
 		goto out_send;
 	}
@@ -8098,7 +8069,7 @@ static void send_transactions(json_params_t *jp)
 		LOGDEBUG("Unhandled mining get request: %s", msg);
 		root = yyjson_mut_pack_val(doc, "{ssso}",
 					   "error", "Unhandled",
-					   "id", newid_val);
+					   "id", jp->yyid_val);
 		goto out_send;
 	}
 
@@ -8107,14 +8078,14 @@ static void send_transactions(json_params_t *jp)
 		LOGNOTICE("Rate limiting get_txnhashes on client %"PRId64"!", jp->client_id);
 			root = yyjson_mut_pack_val(doc, "{ssso}",
 			      "error", "Ratelimit",
-			      "id", newid_val);
+			      "id", jp->yyid_val);
 		goto out_send;
 	}
 	client->last_txns = now_t;
 	if (!params || !strlen(params)) {
 			root = yyjson_mut_pack_val(doc, "{ssso}",
 			      "error", "Invalid params",
-			      "id", newid_val);
+			      "id", jp->yyid_val);
 		goto out_send;
 	}
 	sscanf(params, "%lx", &job_id);
@@ -8125,12 +8096,12 @@ static void send_transactions(json_params_t *jp)
 		root = yyjson_mut_pack_val(doc, "{sssnso}",
 					   "result", hashes,
 					   "error",
-					   "id", newid_val);
+					   "id", jp->yyid_val);
 		free(hashes);
 	} else {
 		root = yyjson_mut_pack_val(doc, "{ssso}",
 		      "error", "Invalid job_id",
-		      "id", newid_val);
+		      "id", jp->yyid_val);
 	}
 out_send:
 	yyjson_mut_doc_set_root(doc, root);

@@ -101,7 +101,12 @@ static yyjson_mut_val *yyjson_mut_pack_value(yyjson_mut_doc *doc,
 		}
 	case 'o':
 		{
-			val = va_arg(*ap, yyjson_mut_val *);
+			/* Deep copy the value into doc so callers may pass
+			 * values belonging to any document */
+			yyjson_mut_val *obj = va_arg(*ap, yyjson_mut_val *);
+			if (!obj)
+				return NULL;
+			val = yyjson_mut_val_mut_copy(doc, obj);
 			if (!val)
 				return NULL;
 			break;
