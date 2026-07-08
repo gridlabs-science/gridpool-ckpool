@@ -6337,7 +6337,7 @@ out_nowb:
 
 	add_submit(client, diff, result, submit);
 
-	doc = yyjson_mut_pack("{sisIsssssssssfsfsssbsssissssssssssssssss}",
+	doc = yyjson_mut_pack("{sIsIsssssssssfsfsssbsssissssssssssssssss}",
 		"workinfoid", id,
 		"clientid", ckpool.remote ? client->virtualid : client->id,
 		"enonce1", client->enonce1,
@@ -8054,7 +8054,7 @@ static void send_transactions(json_params_t *jp)
 			sscanf(msg, "mining.get_transactions(%lx", &job_id);
 		txns = transactions_by_jobid(sdata, job_id);
 		if (txns != -1) {
-			root = yyjson_mut_pack_val(doc, "{sIsnso}",
+			root = yyjson_mut_pack_val(doc, "{sisnso}",
 			      "result", txns,
 			      "error",
 			      "id", jp->yyid_val);
@@ -8310,7 +8310,7 @@ static void *statsupdate(void __maybe_unused *arg)
 			ghs = user->dsps10080 * nonces;
 			suffix_string(ghs, suffix10080, 16, 0);
 
-			doc = yyjson_mut_pack("{ss,ss,ss,ss,ss,si,si,sI,sf,sI,sI}",
+			doc = yyjson_mut_pack("{ss,ss,ss,ss,ss,sI,si,sI,sf,sI,sI}",
 				"hashrate1m", suffix1,
 				"hashrate5m", suffix5,
 				"hashrate1hr", suffix60,
@@ -8376,7 +8376,7 @@ static void *statsupdate(void __maybe_unused *arg)
 
 				LOGDEBUG("Storing worker %s", worker->workername);
 
-				wval = yyjson_mut_pack_val(doc, "{ss,ss,ss,ss,ss,ss,si,sI,sf,sI}",
+				wval = yyjson_mut_pack_val(doc, "{ss,ss,ss,ss,ss,ss,sI,sI,sf,sI}",
 					"workername", worker->workername,
 					"hashrate1m", suffix1,
 					"hashrate5m", suffix5,
@@ -8439,7 +8439,7 @@ static void *statsupdate(void __maybe_unused *arg)
 		}
 		dealloc(fname);
 
-		doc = yyjson_mut_pack("{si,si,si,si,si,si}",
+		doc = yyjson_mut_pack("{sI,sI,si,si,si,si}",
 			"runtime", diff.tv_sec,
 			"lastupdate", now.tv_sec,
 			"Users", stats->users + stats->remote_users,

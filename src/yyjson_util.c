@@ -167,11 +167,76 @@ static yyjson_mut_val *yyjson_mut_pack_value(yyjson_mut_doc *doc,
 	return val;
 }
 
-/* Emulates the simpler functionality of libjansson's json_pack */
-yyjson_mut_doc *yyjson_mut_pack(const char *fmt, ...)
+/* Verifies the number and type of arguments at a pack call site match the
+ * format string, types being the class characters built up by the
+ * YYPACK_TYPES macro. Returns NULL on success or an error description. */
+static const char *yyjson_pack_typecheck(const char *fmt, const char *types)
 {
-	if (!fmt || !*fmt)
+	int n = 0;
+
+	while (*fmt) {
+		char want;
+
+		switch (*fmt++) {
+		case 's':
+			want = 's';
+			break;
+		case 'b':
+		case 'i':
+			want = 'i';
+			break;
+		case 'I':
+			want = 'I';
+			break;
+		case 'f':
+		case 'F':
+			want = 'f';
+			break;
+		case 'o':
+			want = 'o';
+			break;
+		case 'n':
+		case '{':
+		case '}':
+		case '[':
+		case ']':
+		case ':':
+		case ',':
+		case ' ':
+		case '\t':
+		case '\n':
+		case '\r':
+			continue;
+		default:
+			return "invalid format specifier";
+		}
+		if (unlikely(!types[n]))
+			return "too few arguments for format";
+		if (unlikely(types[n] != want))
+			return "argument type mismatch";
+		n++;
+	}
+	if (unlikely(types[n]))
+		return "too many arguments for format";
+	return NULL;
+}
+
+/* Emulates the simpler functionality of libjansson's json_pack. Called via
+ * the yyjson_mut_pack macro wrapper which checks call site correctness. */
+yyjson_mut_doc *_yyjson_mut_pack(const char *file, const char *func, const int line,
+				 const char *types, const char *fmt, ...)
+{
+	const char *err;
+
+	if (unlikely(!fmt || !*fmt))
 		return NULL;
+
+	err = yyjson_pack_typecheck(fmt, types);
+	if (unlikely(err)) {
+		LOGEMERG("%s in yyjson_mut_pack fmt \"%s\" from %s %s:%d",
+			 err, fmt, file, func, line);
+		return NULL;
+	}
 
 	yyjson_mut_doc *doc = yyjson_mut_doc_new(&ckyyalc);
 	if (!doc)
@@ -200,10 +265,20 @@ yyjson_mut_doc *yyjson_mut_pack(const char *fmt, ...)
 	return doc;
 }
 
-yyjson_mut_val *yyjson_mut_pack_val(yyjson_mut_doc *doc, const char *fmt, ...)
+yyjson_mut_val *_yyjson_mut_pack_val(const char *file, const char *func, const int line,
+				     const char *types, yyjson_mut_doc *doc, const char *fmt, ...)
 {
-	if (!doc || !fmt || !*fmt)
+	const char *err;
+
+	if (unlikely(!doc || !fmt || !*fmt))
 		return NULL;
+
+	err = yyjson_pack_typecheck(fmt, types);
+	if (unlikely(err)) {
+		LOGEMERG("%s in yyjson_mut_pack_val fmt \"%s\" from %s %s:%d",
+			 err, fmt, file, func, line);
+		return NULL;
+	}
 
 	va_list ap;
 	va_start(ap, fmt);
