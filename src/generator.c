@@ -11,7 +11,6 @@
 
 #include <sys/epoll.h>
 #include <sys/socket.h>
-#include <jansson.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -29,7 +28,7 @@ struct notify_instance {
 	int64_t id64;
 
 	char prevhash[68];
-	json_t *jobid;
+	yyjson_mut_doc *jobid;
 	char *coinbase1;
 	char *coinbase2;
 	int coinb1len;
@@ -62,7 +61,7 @@ struct stratum_msg {
 	struct stratum_msg *next;
 	struct stratum_msg *prev;
 
-	json_t *json_msg;
+	yyjson_mut_doc *doc;
 	int64_t client_id;
 };
 
@@ -533,22 +532,22 @@ static bool connect_proxy(connsock_t *cs, proxy_instance_t *proxy)
 
 /* For some reason notify is buried at various different array depths so use
  * a reentrant function to try and find it. */
-static json_t *find_notify(json_t *val)
+static yyjson_val *find_notify(yyjson_val *val)
 {
+	yyjson_val *ret = NULL;
 	int arr_size, i;
-	json_t *ret = NULL;
 	const char *entry;
 
-	if (!json_is_array(val))
+	if (!yyjson_is_arr(val))
 		return NULL;
-	arr_size = json_array_size(val);
-	entry = json_string_value(json_array_get(val, 0));
+	arr_size = yyjson_arr_size(val);
+	entry = yyjson_get_str(yyjson_arr_get(val, 0));
 	if (cmdmatch(entry, "mining.notify"))
 		return val;
 	for (i = 0; i < arr_size; i++) {
-		json_t *arr_val;
+		yyjson_val *arr_val;
 
-		arr_val = json_array_get(val, i);
+		arr_val = yyjson_arr_get(val, i);
 		ret = find_notify(arr_val);
 		if (ret)
 			break;
@@ -613,7 +612,8 @@ static void recruit_subproxies(proxy_instance_t *proxi, const int recruits);
 
 static bool parse_subscribe(connsock_t *cs, proxy_instance_t *proxi)
 {
-	json_t *val = NULL, *res_val, *notify_val, *tmp;
+	yyjson_val *res_val, *notify_val, *tmp;
+	yyjson_doc *val = NULL;
 	bool parsed, ret = false;
 	int retries = 0, size;
 	const char *string;
@@ -628,16 +628,16 @@ retry:
 	}
 	LOGDEBUG("parse_subscribe received %s", buf);
 	/* Ignore err_val here stored in &tmp */
-	val = json_msg_result(buf, &res_val, &tmp);
+	val = yyjson_msg_result(buf, &res_val, &tmp);
 	if (!val || !res_val) {
 		LOGINFO("Failed to get a json result in parse_subscribe, got: %s", buf);
 		parsed = false;
 	}
-	if (!json_is_array(res_val)) {
+	if (!yyjson_is_arr(res_val)) {
 		LOGINFO("Result in parse_subscribe not an array");
 		parsed = false;
 	}
-	size = json_array_size(res_val);
+	size = yyjson_arr_size(res_val);
 	if (size < 3) {
 		LOGINFO("Result in parse_subscribe array too small");
 		parsed = false;
@@ -653,6 +653,10 @@ retry:
 			 * recvd list to be parsed later */
 			append_proxy_line(proxi, buf);
 			buf = NULL;
+			if (val) {
+				yyjson_doc_free(val);
+				val = NULL;
+			}
 			goto retry;
 		}
 		LOGNOTICE("Proxy %d:%d %s failed to parse subscribe response in parse_subscribe",
@@ -660,12 +664,12 @@ retry:
 		goto out;
 	}
 
-	tmp = json_array_get(res_val, 1);
-	if (!tmp || !json_is_string(tmp)) {
+	tmp = yyjson_arr_get(res_val, 1);
+	if (!tmp || !yyjson_is_str(tmp)) {
 		LOGWARNING("Failed to parse enonce1 in parse_subscribe");
 		goto out;
 	}
-	string = json_string_value(tmp);
+	string = yyjson_get_str(tmp);
 	old = proxi->enonce1;
 	proxi->enonce1 = strdup(string);
 	free(old);
@@ -678,12 +682,12 @@ retry:
 	proxi->enonce1bin = ckalloc(proxi->nonce1len);
 	free(old);
 	hex2bin(proxi->enonce1bin, proxi->enonce1, proxi->nonce1len);
-	tmp = json_array_get(res_val, 2);
-	if (!tmp || !json_is_integer(tmp)) {
+	tmp = yyjson_arr_get(res_val, 2);
+	if (!tmp || !yyjson_is_int(tmp)) {
 		LOGWARNING("Failed to parse nonce2len in parse_subscribe");
 		goto out;
 	}
-	size = json_integer_value(tmp);
+	size = yyjson_get_sint(tmp);
 	if (size < 1 || size > 8) {
 		LOGWARNING("Invalid nonce2len %d in parse_subscribe", size);
 		goto out;
@@ -706,7 +710,7 @@ retry:
 
 out:
 	if (val)
-		json_decref(val);
+		yyjson_doc_free(val);
 	free(buf);
 	return ret;
 }
@@ -769,7 +773,8 @@ out:
 /* cs semaphore must be held */
 static bool passthrough_stratum(connsock_t *cs, proxy_instance_t *proxi)
 {
-	json_t *val = NULL, *res_val, *err_val;
+	yyjson_val *res_val, *err_val;
+	yyjson_doc *val = NULL;
 	bool res, ret = false;
 	yyjson_mut_doc *req;
 	float timeout = 10;
@@ -789,13 +794,13 @@ static bool passthrough_stratum(connsock_t *cs, proxy_instance_t *proxi)
 	}
 	/* Ignore err_val here since we should always get a result from an
 	 * upstream passthrough server */
-	val = json_msg_result(cs->buf, &res_val, &err_val);
+	val = yyjson_msg_result(cs->buf, &res_val, &err_val);
 	if (!val || !res_val) {
 		LOGWARNING("Failed to get a json result in passthrough_stratum, got: %s",
 			   cs->buf);
 		goto out;
 	}
-	ret = json_is_true(res_val);
+	ret = yyjson_is_true(res_val);
 	if (!ret) {
 		LOGWARNING("Denied passthrough for stratum");
 		goto out;
@@ -803,7 +808,7 @@ static bool passthrough_stratum(connsock_t *cs, proxy_instance_t *proxi)
 	proxi->passthrough = true;
 out:
 	if (val)
-		json_decref(val);
+		yyjson_doc_free(val);
 	if (!ret)
 		Close(cs->fd);
 	return ret;
@@ -812,7 +817,8 @@ out:
 /* cs semaphore must be held */
 static bool node_stratum(connsock_t *cs, proxy_instance_t *proxi)
 {
-	json_t *val = NULL, *res_val, *err_val;
+	yyjson_val *res_val, *err_val;
+	yyjson_doc *val = NULL;
 	bool res, ret = false;
 	yyjson_mut_doc *req;
 	float timeout = 10;
@@ -833,13 +839,13 @@ static bool node_stratum(connsock_t *cs, proxy_instance_t *proxi)
 	}
 	/* Ignore err_val here since we should always get a result from an
 	 * upstream server */
-	val = json_msg_result(cs->buf, &res_val, &err_val);
+	val = yyjson_msg_result(cs->buf, &res_val, &err_val);
 	if (!val || !res_val) {
 		LOGWARNING("Failed to get a json result in node_stratum, got: %s",
 			   cs->buf);
 		goto out;
 	}
-	ret = json_is_true(res_val);
+	ret = yyjson_is_true(res_val);
 	if (!ret) {
 		LOGWARNING("Denied node setup for stratum");
 		goto out;
@@ -847,7 +853,7 @@ static bool node_stratum(connsock_t *cs, proxy_instance_t *proxi)
 	proxi->node = true;
 out:
 	if (val)
-		json_decref(val);
+		yyjson_doc_free(val);
 	if (!ret)
 		Close(cs->fd);
 	return ret;
@@ -972,33 +978,42 @@ out:
 	return ret;
 }
 
-static bool parse_notify(proxy_instance_t *proxi, json_t *val)
+static bool parse_notify(proxy_instance_t *proxi, yyjson_val *val)
 {
-	const char *prev_hash, *bbversion, *nbit, *ntime;
+	const char *prev_hash, *bbversion, *nbit, *ntime, *string;
+	yyjson_mut_doc *job_id = NULL;
 	gdata_t *gdata = ckpool.gdata;
-	char *coinbase1, *coinbase2;
+	char *coinbase1 = NULL, *coinbase2 = NULL;
 	const char *jobidbuf;
 	bool clean, ret = false;
 	notify_instance_t *ni;
-	json_t *arr, *job_id;
+	yyjson_val *arr, *jid;
 	int merkles, i;
 
-	arr = json_array_get(val, 4);
-	if (!arr || !json_is_array(arr))
+	arr = yyjson_arr_get(val, 4);
+	if (!arr || !yyjson_is_arr(arr))
 		goto out;
 
-	merkles = json_array_size(arr);
-	job_id = json_copy(json_array_get(val, 0));
-	prev_hash = __json_array_string(val, 1);
-	coinbase1 = json_array_string(val, 2);
-	coinbase2 = json_array_string(val, 3);
-	bbversion = __json_array_string(val, 5);
-	nbit = __json_array_string(val, 6);
-	ntime = __json_array_string(val, 7);
-	clean = json_is_true(json_array_get(val, 8));
+	merkles = yyjson_arr_size(arr);
+	jid = yyjson_arr_get(val, 0);
+	if (jid) {
+		job_id = yyjson_mut_doc_new(&ckyyalc);
+		yyjson_mut_doc_set_root(job_id, yyjson_val_mut_copy(job_id, jid));
+	}
+	prev_hash = yyjson_get_str(yyjson_arr_get(val, 1));
+	string = yyjson_get_str(yyjson_arr_get(val, 2));
+	if (string)
+		coinbase1 = strdup(string);
+	string = yyjson_get_str(yyjson_arr_get(val, 3));
+	if (string)
+		coinbase2 = strdup(string);
+	bbversion = yyjson_get_str(yyjson_arr_get(val, 5));
+	nbit = yyjson_get_str(yyjson_arr_get(val, 6));
+	ntime = yyjson_get_str(yyjson_arr_get(val, 7));
+	clean = yyjson_is_true(yyjson_arr_get(val, 8));
 	if (!job_id || !prev_hash || !coinbase1 || !coinbase2 || !bbversion || !nbit || !ntime) {
 		if (job_id)
-			json_decref(job_id);
+			yyjson_mut_doc_free(job_id);
 		if (coinbase1)
 			free(coinbase1);
 		if (coinbase2)
@@ -1009,7 +1024,7 @@ static bool parse_notify(proxy_instance_t *proxi, json_t *val)
 	LOGDEBUG("Received new notify from proxy %d:%d", proxi->id, proxi->subid);
 	ni = ckzalloc(sizeof(notify_instance_t));
 	ni->jobid = job_id;
-	jobidbuf = json_string_value(job_id);
+	jobidbuf = yyjson_get_str(jid);
 	LOGDEBUG("JobID %s", jobidbuf);
 	ni->coinbase1 = coinbase1;
 	LOGDEBUG("Coinbase1 %s", coinbase1);
@@ -1028,7 +1043,7 @@ static bool parse_notify(proxy_instance_t *proxi, json_t *val)
 	LOGDEBUG("Clean %s", clean ? "true" : "false");
 	LOGDEBUG("Merkles %d", merkles);
 	for (i = 0; i < merkles; i++) {
-		const char *merkle = __json_array_string(arr, i);
+		const char *merkle = yyjson_get_str(yyjson_arr_get(arr, i));
 
 		LOGDEBUG("Merkle %d %s", i, merkle);
 		memcpy(&ni->merklehash[i][0], merkle, 65);
@@ -1048,9 +1063,9 @@ out:
 	return ret;
 }
 
-static bool parse_diff(proxy_instance_t *proxi, json_t *val)
+static bool parse_diff(proxy_instance_t *proxi, yyjson_val *val)
 {
-	double diff = json_number_value(json_array_get(val, 0));
+	double diff = yyjson_get_num(yyjson_arr_get(val, 0));
 
 	if (diff == 0 || diff == proxi->diff)
 		return true;
@@ -1058,14 +1073,14 @@ static bool parse_diff(proxy_instance_t *proxi, json_t *val)
 	return true;
 }
 
-static bool send_version(proxy_instance_t *proxi, json_t *val)
+static bool send_version(proxy_instance_t *proxi, yyjson_val *val)
 {
 	yyjson_mut_doc *doc = yyjson_mut_doc_new(&ckyyalc);
 	yyjson_mut_val *root;
 	bool ret;
 
 	root = yyjson_mut_pack_val(doc, "{sosssn}", "id",
-				   json_to_yyjson_val(doc, json_object_get(val, "id")),
+				   yyjson_val_mut_copy(doc, yyjson_obj_get(val, "id")),
 				   "result", PACKAGE"/"VERSION, "error");
 	yyjson_mut_doc_set_root(doc, root);
 	ret = send_yyjson_msg(&proxi->cs, doc);
@@ -1073,27 +1088,27 @@ static bool send_version(proxy_instance_t *proxi, json_t *val)
 	return ret;
 }
 
-static bool show_message(json_t *val)
+static bool show_message(yyjson_val *val)
 {
 	const char *msg;
 
-	if (!json_is_array(val))
+	if (!yyjson_is_arr(val))
 		return false;
-	msg = json_string_value(json_array_get(val, 0));
+	msg = yyjson_get_str(yyjson_arr_get(val, 0));
 	if (!msg)
 		return false;
 	LOGNOTICE("Pool message: %s", msg);
 	return true;
 }
 
-static bool send_pong(proxy_instance_t *proxi, json_t *val)
+static bool send_pong(proxy_instance_t *proxi, yyjson_val *val)
 {
 	yyjson_mut_doc *doc = yyjson_mut_doc_new(&ckyyalc);
 	yyjson_mut_val *root;
 	bool ret;
 
 	root = yyjson_mut_pack_val(doc, "{sosssn}", "id",
-				   json_to_yyjson_val(doc, json_object_get(val, "id")),
+				   yyjson_val_mut_copy(doc, yyjson_obj_get(val, "id")),
 				   "result", "pong", "error");
 	yyjson_mut_doc_set_root(doc, root);
 	ret = send_yyjson_msg(&proxi->cs, doc);
@@ -1230,7 +1245,7 @@ static void disable_subproxy(gdata_t *gdata, proxy_instance_t *proxi, proxy_inst
 	}
 }
 
-static bool parse_reconnect(proxy_instance_t *proxy, json_t *val)
+static bool parse_reconnect(proxy_instance_t *proxy, yyjson_val *val)
 {
 	bool sameurl = false, ret = false;
 	gdata_t *gdata = ckpool.gdata;
@@ -1239,12 +1254,12 @@ static bool parse_reconnect(proxy_instance_t *proxy, json_t *val)
 	int new_port;
 	char *url;
 
-	new_url = json_string_value(json_array_get(val, 0));
-	new_port = json_integer_value(json_array_get(val, 1));
+	new_url = yyjson_get_str(yyjson_arr_get(val, 0));
+	new_port = yyjson_get_sint(yyjson_arr_get(val, 1));
 	/* See if we have an invalid entry listing port as a string instead of
 	 * integer and handle that. */
 	if (!new_port) {
-		const char *newport_string = json_string_value(json_array_get(val, 1));
+		const char *newport_string = yyjson_get_str(yyjson_arr_get(val, 1));
 
 		if (newport_string)
 			sscanf(newport_string, "%d", &new_port);
@@ -1363,27 +1378,27 @@ static void send_notify(proxy_instance_t *proxi, notify_instance_t *ni)
 
 static bool parse_method(proxy_instance_t *proxi, const char *msg)
 {
-	json_t *val = NULL, *method, *err_val, *params;
-	json_error_t err;
+	yyjson_val *val, *method, *err_val, *params;
+	yyjson_doc *doc = NULL;
 	bool ret = false;
 	const char *buf;
 
 	if (!msg)
 		goto out;
-	memset(&err, 0, sizeof(err));
-	val = json_loads(msg, 0, &err);
-	if (!val) {
+	doc = yyjson_read(msg, strlen(msg), 0);
+	if (!doc) {
 		if (proxi->global) {
-			LOGWARNING("JSON decode of proxy %d:%s msg %s failed(%d): %s",
-				   proxi->id, proxi->url, msg, err.line, err.text);
+			LOGWARNING("JSON decode of proxy %d:%s msg %s failed",
+				   proxi->id, proxi->url, msg);
 		} else {
-			LOGNOTICE("JSON decode of proxy %d:%s msg %s failed(%d): %s",
-				  proxi->id, proxi->url, msg, err.line, err.text);
+			LOGNOTICE("JSON decode of proxy %d:%s msg %s failed",
+				  proxi->id, proxi->url, msg);
 		}
 		goto out;
 	}
+	val = yyjson_doc_get_root(doc);
 
-	method = json_object_get(val, "method");
+	method = yyjson_obj_get(val, "method");
 	if (!method) {
 		/* Likely a share, look for harmless unhandled methods in
 		 * pool response */
@@ -1394,14 +1409,14 @@ static bool parse_method(proxy_instance_t *proxi, const char *msg)
 			LOGDEBUG("Failed to find method in json for parse_method");
 		goto out;
 	}
-	err_val = json_object_get(val, "error");
-	params = json_object_get(val, "params");
+	err_val = yyjson_obj_get(val, "error");
+	params = yyjson_obj_get(val, "params");
 
-	if (err_val && !json_is_null(err_val)) {
+	if (err_val && !yyjson_is_null(err_val)) {
 		char *ss;
 
 		if (err_val)
-			ss = json_dumps(err_val, 0);
+			ss = yyjson_val_write(err_val, 0, NULL);
 		else
 			ss = strdup("(unknown reason)");
 
@@ -1410,11 +1425,11 @@ static bool parse_method(proxy_instance_t *proxi, const char *msg)
 		goto out;
 	}
 
-	if (!json_is_string(method)) {
+	if (!yyjson_is_str(method)) {
 		LOGINFO("Method is not string in parse_method");
 		goto out;
 	}
-	buf = json_string_value(method);
+	buf = yyjson_get_str(method);
 	if (!buf || strlen(buf) < 1) {
 		LOGINFO("Invalid string for method in parse_method");
 		goto out;
@@ -1453,15 +1468,16 @@ static bool parse_method(proxy_instance_t *proxi, const char *msg)
 		goto out;
 	}
 out:
-	if (val)
-		json_decref(val);
+	if (doc)
+		yyjson_doc_free(doc);
 	return ret;
 }
 
 /* cs semaphore must be held */
 static bool auth_stratum(connsock_t *cs, proxy_instance_t *proxi)
 {
-	json_t *val = NULL, *res_val, *err_val;
+	yyjson_val *res_val, *err_val;
+	yyjson_doc *val = NULL;
 	yyjson_mut_doc *req;
 	char *buf = NULL;
 	bool ret;
@@ -1496,7 +1512,7 @@ static bool auth_stratum(connsock_t *cs, proxy_instance_t *proxi)
 		ret = parse_method(proxi, buf);
 	} while (ret);
 
-	val = json_msg_result(buf, &res_val, &err_val);
+	val = yyjson_msg_result(buf, &res_val, &err_val);
 	if (!val) {
 		if (proxi->global) {
 			LOGWARNING("Proxy %d:%d %s failed to get a json result in auth_stratum, got: %s",
@@ -1508,13 +1524,13 @@ static bool auth_stratum(connsock_t *cs, proxy_instance_t *proxi)
 		goto out;
 	}
 
-	if (err_val && !json_is_null(err_val)) {
+	if (err_val && !yyjson_is_null(err_val)) {
 		LOGWARNING("Proxy %d:%d %s failed to authorise in auth_stratum due to err_val, got: %s",
 			   proxi->id, proxi->subid, proxi->url, buf);
 		goto out;
 	}
 	if (res_val) {
-		ret = json_is_true(res_val);
+		ret = yyjson_is_true(res_val);
 		if (!ret) {
 			if (proxi->global) {
 				LOGWARNING("Proxy %d:%d %s failed to authorise in auth_stratum, got: %s",
@@ -1532,7 +1548,7 @@ static bool auth_stratum(connsock_t *cs, proxy_instance_t *proxi)
 	LOGINFO("Proxy %d:%d %s auth success in auth_stratum", proxi->id, proxi->subid, proxi->url);
 out:
 	if (val)
-		json_decref(val);
+		yyjson_doc_free(val);
 	if (ret) {
 		/* Now parse any cached responses so there are none in the
 		 * queue and they can be managed one at a time from now on. */
@@ -1646,8 +1662,9 @@ static int add_share(gdata_t *gdata, const int64_t client_id, const double diff)
 	return ret;
 }
 
-static void submit_share(gdata_t *gdata, json_t *val)
+static void submit_share(gdata_t *gdata, yyjson_mut_doc *doc)
 {
+	yyjson_mut_val *val = yyjson_mut_doc_get_root(doc);
 	proxy_instance_t *proxy, *proxi;
 	int id, subid, share_id;
 	bool success = false;
@@ -1656,15 +1673,15 @@ static void submit_share(gdata_t *gdata, json_t *val)
 
 	/* Get the client id so we can tell the stratifier to drop it if the
 	 * proxy it's bound to is not functional */
-	if (unlikely(!json_get_int64(&client_id, val, "client_id"))) {
+	if (unlikely(!yyjson_mut_obj_get_int64(&client_id, val, "client_id"))) {
 		LOGWARNING("Got no client_id in share");
 		goto out;
 	}
-	if (unlikely(!json_get_int(&id, val, "proxy"))) {
+	if (unlikely(!yyjson_mut_obj_get_int(&id, val, "proxy"))) {
 		LOGWARNING("Got no proxy in share");
 		goto out;
 	}
-	if (unlikely(!json_get_int(&subid, val, "subproxy"))) {
+	if (unlikely(!yyjson_mut_obj_get_int(&subid, val, "subproxy"))) {
 		LOGWARNING("Got no subproxy in share");
 		goto out;
 	}
@@ -1691,9 +1708,9 @@ static void submit_share(gdata_t *gdata, json_t *val)
 
 	success = true;
 	msg = ckzalloc(sizeof(stratum_msg_t));
-	msg->json_msg = val;
+	msg->doc = doc;
 	share_id = add_share(gdata, client_id, proxi->diff);
-	json_set_int(val, "id", share_id);
+	yyjson_mut_obj_add_int(doc, val, "id", share_id);
 
 	/* Add the new message to the psend list */
 	mutex_lock(&gdata->psend_lock);
@@ -1704,13 +1721,13 @@ static void submit_share(gdata_t *gdata, json_t *val)
 
 out:
 	if (!success)
-		json_decref(val);
+		yyjson_mut_doc_free(doc);
 }
 
 static void clear_notify(notify_instance_t *ni)
 {
 	if (ni->jobid)
-		json_decref(ni->jobid);
+		yyjson_mut_doc_free(ni->jobid);
 	free(ni->coinbase1);
 	free(ni->coinbase2);
 	free(ni);
@@ -1759,36 +1776,38 @@ static void account_shares(proxy_instance_t *proxy, const double diff, const boo
  * and -1 if it is recognised as a share but invalid. */
 static int parse_share(gdata_t *gdata, proxy_instance_t *proxi, const char *buf)
 {
-	json_t *val = NULL, *idval;
+	yyjson_val *val, *idval;
+	yyjson_doc *doc = NULL;
 	bool result = false;
 	share_msg_t *share;
 	int ret = 0;
 	int64_t id;
 
-	val = json_loads(buf, 0, NULL);
-	if (unlikely(!val)) {
+	doc = yyjson_read(buf, strlen(buf), 0);
+	if (unlikely(!doc)) {
 		LOGINFO("Failed to parse upstream json msg: %s", buf);
 		goto out;
 	}
-	idval = json_object_get(val, "id");
+	val = yyjson_doc_get_root(doc);
+	idval = yyjson_obj_get(val, "id");
 	if (unlikely(!idval)) {
 		LOGINFO("Failed to find id in upstream json msg: %s", buf);
 		goto out;
 	}
-	id = json_integer_value(idval);
+	id = yyjson_get_sint(idval);
 	{
-		json_t *res_val = json_object_get(val, "result");
+		yyjson_val *res_val = yyjson_obj_get(val, "result");
 
-		if (!json_is_boolean(res_val)) {
-			json_t *err_val = json_object_get(val, "error");
+		if (!yyjson_is_bool(res_val)) {
+			yyjson_val *err_val = yyjson_obj_get(val, "error");
 
-			if (unlikely(!(json_is_null(res_val) && err_val && !json_is_null(err_val)))) {
+			if (unlikely(!(yyjson_is_null(res_val) && err_val && !yyjson_is_null(err_val)))) {
 				LOGINFO("Failed to find result in upstream json msg: %s", buf);
 				goto out;
 			}
 			result = false;
 		} else
-			result = json_is_true(res_val);
+			result = yyjson_get_bool(res_val);
 	}
 
 	mutex_lock(&gdata->share_lock);
@@ -1814,8 +1833,8 @@ static int parse_share(gdata_t *gdata, proxy_instance_t *proxi, const char *buf)
 		buf, share->client_id);
 	free(share);
 out:
-	if (val)
-		json_decref(val);
+	if (doc)
+		yyjson_doc_free(doc);
 	return ret;
 }
 
@@ -1908,14 +1927,13 @@ static void *proxy_send(void __maybe_unused *arg)
 	while (42) {
 		int proxyid = 0, subid = 0, share_id = 0;
 		proxy_instance_t *proxy, *subproxy;
+		yyjson_mut_val *root, *sroot, *jobid;
 		int64_t client_id = 0, id;
 		notify_instance_t *ni;
-		json_t *jobid = NULL;
-		yyjson_mut_val *root;
 		yyjson_mut_doc *doc;
 
 		if (unlikely(msg)) {
-			json_decref(msg->json_msg);
+			yyjson_mut_doc_free(msg->doc);
 			free(msg);
 		}
 
@@ -1939,23 +1957,24 @@ static void *proxy_send(void __maybe_unused *arg)
 			continue;
 		}
 
-		if (unlikely(!json_get_int(&subid, msg->json_msg, "subproxy"))) {
+		sroot = yyjson_mut_doc_get_root(msg->doc);
+		if (unlikely(!yyjson_mut_obj_get_int(&subid, sroot, "subproxy"))) {
 			LOGWARNING("Failed to find subproxy in proxy_send msg");
 			continue;
 		}
-		if (unlikely(!json_get_int64(&id, msg->json_msg, "jobid"))) {
+		if (unlikely(!yyjson_mut_obj_get_int64(&id, sroot, "jobid"))) {
 			LOGWARNING("Failed to find jobid in proxy_send msg");
 			continue;
 		}
-		if (unlikely(!json_get_int(&proxyid, msg->json_msg, "proxy"))) {
+		if (unlikely(!yyjson_mut_obj_get_int(&proxyid, sroot, "proxy"))) {
 			LOGWARNING("Failed to find proxy in proxy_send msg");
 			continue;
 		}
-		if (unlikely(!json_get_int64(&client_id, msg->json_msg, "client_id"))) {
+		if (unlikely(!yyjson_mut_obj_get_int64(&client_id, sroot, "client_id"))) {
 			LOGWARNING("Failed to find client_id in proxy_send msg");
 			continue;
 		}
-		json_get_int(&share_id, msg->json_msg, "id");
+		yyjson_mut_obj_get_int(&share_id, sroot, "id");
 		proxy = proxy_by_id(gdata, proxyid);
 		if (unlikely(!proxy)) {
 			LOGWARNING("Proxysend for got message for non-existent proxy %d",
@@ -1969,29 +1988,30 @@ static void *proxy_send(void __maybe_unused *arg)
 			continue;
 		}
 
+		doc = yyjson_mut_doc_new(&ckyyalc);
+		jobid = NULL;
 		mutex_lock(&gdata->notify_lock);
 		HASH_FIND_INT(gdata->notify_instances, &id, ni);
 		if (ni)
-			jobid = json_copy(ni->jobid);
+			jobid = yyjson_mut_val_mut_copy(doc, yyjson_mut_doc_get_root(ni->jobid));
 		mutex_unlock(&gdata->notify_lock);
 
 		if (unlikely(!jobid)) {
 			stratifier_reconnect_client(client_id);
 			LOGNOTICE("Proxy %d:%s failed to find matching jobid in proxysend",
 				  subproxy->id, subproxy->url);
+			yyjson_mut_doc_free(doc);
 			continue;
 		}
 
-		doc = yyjson_mut_doc_new(&ckyyalc);
 		root = yyjson_mut_pack_val(doc, "{s[sosss]siss}", "params", subproxy->auth,
-				json_to_yyjson_val(doc, jobid),
-				json_string_value(json_object_get(msg->json_msg, "nonce2")),
-				json_string_value(json_object_get(msg->json_msg, "ntime")),
-				json_string_value(json_object_get(msg->json_msg, "nonce")),
+				jobid,
+				yyjson_mut_get_str(yyjson_mut_obj_get(sroot, "nonce2")),
+				yyjson_mut_get_str(yyjson_mut_obj_get(sroot, "ntime")),
+				yyjson_mut_get_str(yyjson_mut_obj_get(sroot, "nonce")),
 				"id", share_id,
 				"method", "mining.submit");
 		yyjson_mut_doc_set_root(doc, root);
-		json_decref(jobid);
 		add_yyjson_msgq(&csmsgq, subproxy, doc);
 		send_json_msgq(gdata, &csmsgq);
 	}
@@ -2039,10 +2059,8 @@ void generator_add_send(yyjson_mut_doc *doc)
 	char *buf;
 
 	if (!ckpool.passthrough) {
-		/* Braindead conversion until the proxy send message queue is
-		 * converted to yyjson */
-		submit_share(gdata, yyjson_to_json(doc));
-		goto out;
+		submit_share(gdata, doc);
+		return;
 	}
 	if (unlikely(!gdata->current_proxy)) {
 		LOGWARNING("No current proxy to send passthrough data to");
@@ -2703,18 +2721,18 @@ static void send_sublist(gdata_t *gdata, const int sockd, const char *buf)
 	yyjson_mut_doc *doc = yyjson_mut_doc_new(&ckyyalc), *res = NULL;
 	yyjson_mut_val *sval, *array_val, *root;
 	proxy_instance_t *proxy, *subproxy, *tmp;
-	json_t *val = NULL;
-	json_error_t err_val;
+	yyjson_doc *val = NULL;
+	yyjson_read_err err_val;
 	int64_t id;
 
 	array_val = yyjson_mut_arr(doc);
 
-	val = json_loads(buf, 0, &err_val);
+	val = yyjson_read_opts((char *)buf, strlen(buf), 0, NULL, &err_val);
 	if (unlikely(!val)) {
 		res = yyjson_encode_errormsg(&err_val);
 		goto out;
 	}
-	if (unlikely(!json_get_int64(&id, val, "id"))) {
+	if (unlikely(!yyjson_obj_get_int64(&id, yyjson_doc_get_root(val), "id"))) {
 		res = yyjson_errormsg("Failed to get ID in send_sublist JSON: %s", buf);
 		goto out;
 	}
@@ -2748,7 +2766,7 @@ out:
 	if (doc)
 		yyjson_mut_doc_free(doc);
 	if (val)
-		json_decref(val);
+		yyjson_doc_free(val);
 	send_api_yyresponse(res, sockd);
 }
 
@@ -2796,20 +2814,22 @@ static void parse_addproxy(gdata_t *gdata, const int sockd, const char *buf)
 	char *url = NULL, *auth = NULL, *pass = NULL;
 	yyjson_mut_doc *res = NULL;
 	proxy_instance_t *proxy;
-	json_t *val = NULL;
-	json_error_t err_val;
+	yyjson_val *root = NULL;
+	yyjson_doc *val = NULL;
+	yyjson_read_err err_val;
 	int id, userid;
 	bool global;
 
-	val = json_loads(buf, 0, &err_val);
+	val = yyjson_read_opts((char *)buf, strlen(buf), 0, NULL, &err_val);
 	if (unlikely(!val)) {
 		res = yyjson_encode_errormsg(&err_val);
 		goto out;
 	}
-	json_get_string(&url, val, "url");
-	json_get_string(&auth, val, "auth");
-	json_get_string(&pass, val, "pass");
-	if (json_get_int(&userid, val, "userid"))
+	root = yyjson_doc_get_root(val);
+	yyjson_obj_get_string(&url, root, "url");
+	yyjson_obj_get_string(&auth, root, "auth");
+	yyjson_obj_get_string(&pass, root, "pass");
+	if (yyjson_obj_get_int(&userid, root, "userid"))
 		global = false;
 	else
 		global = true;
@@ -2847,7 +2867,7 @@ static void parse_addproxy(gdata_t *gdata, const int sockd, const char *buf)
 	}
 out:
 	if (val)
-		json_decref(val);
+		yyjson_doc_free(val);
 	send_api_yyresponse(res, sockd);
 }
 
@@ -2887,16 +2907,16 @@ static void parse_delproxy(gdata_t *gdata, const int sockd, const char *buf)
 {
 	yyjson_mut_doc *res = NULL;
 	proxy_instance_t *proxy;
-	json_t *val = NULL;
-	json_error_t err_val;
+	yyjson_doc *val = NULL;
+	yyjson_read_err err_val;
 	int id = -1;
 
-	val = json_loads(buf, 0, &err_val);
+	val = yyjson_read_opts((char *)buf, strlen(buf), 0, NULL, &err_val);
 	if (unlikely(!val)) {
 		res = yyjson_encode_errormsg(&err_val);
 		goto out;
 	}
-	json_get_int(&id, val, "id");
+	yyjson_obj_get_int(&id, yyjson_doc_get_root(val), "id");
 	proxy = proxy_by_id(gdata, id);
 	if (!proxy) {
 		res = yyjson_errormsg("Proxy id %d not found", id);
@@ -2909,7 +2929,7 @@ static void parse_delproxy(gdata_t *gdata, const int sockd, const char *buf)
 	delete_proxy(gdata, proxy);
 out:
 	if (val)
-		json_decref(val);
+		yyjson_doc_free(val);
 	send_api_yyresponse(res, sockd);
 }
 
@@ -2917,16 +2937,16 @@ static void parse_ableproxy(gdata_t *gdata, const int sockd, const char *buf, bo
 {
 	yyjson_mut_doc *res = NULL;
 	proxy_instance_t *proxy;
-	json_t *val = NULL;
-	json_error_t err_val;
+	yyjson_doc *val = NULL;
+	yyjson_read_err err_val;
 	int id = -1;
 
-	val = json_loads(buf, 0, &err_val);
+	val = yyjson_read_opts((char *)buf, strlen(buf), 0, NULL, &err_val);
 	if (unlikely(!val)) {
 		res = yyjson_encode_errormsg(&err_val);
 		goto out;
 	}
-	json_get_int(&id, val, "id");
+	yyjson_obj_get_int(&id, yyjson_doc_get_root(val), "id");
 	proxy = proxy_by_id(gdata, id);
 	if (!proxy) {
 		res = yyjson_errormsg("Proxy id %d not found", id);
@@ -2946,7 +2966,7 @@ static void parse_ableproxy(gdata_t *gdata, const int sockd, const char *buf, bo
 		reconnect_proxy(proxy);
 out:
 	if (val)
-		json_decref(val);
+		yyjson_doc_free(val);
 	send_api_yyresponse(res, sockd);
 }
 
@@ -3101,21 +3121,23 @@ static void parse_proxystats(gdata_t *gdata, const int sockd, const char *buf)
 {
 	yyjson_mut_doc *res = NULL;
 	proxy_instance_t *proxy;
-	json_t *val = NULL;
-	json_error_t err_val;
+	yyjson_val *root = NULL;
+	yyjson_doc *val = NULL;
+	yyjson_read_err err_val;
 	bool totals = false;
 	int id, subid = 0;
 
-	val = json_loads(buf, 0, &err_val);
+	val = yyjson_read_opts((char *)buf, strlen(buf), 0, NULL, &err_val);
 	if (unlikely(!val)) {
 		res = all_proxystats(gdata);
 		goto out_noval;
 	}
-	if (!json_get_int(&id, val, "id")) {
+	root = yyjson_doc_get_root(val);
+	if (!yyjson_obj_get_int(&id, root, "id")) {
 		res = all_proxystats(gdata);
 		goto out;
 	}
-	if (!json_get_int(&subid, val, "subid"))
+	if (!yyjson_obj_get_int(&subid, root, "subid"))
 		totals = true;
 	proxy = proxy_by_id(gdata, id);
 	if (!proxy) {
@@ -3131,7 +3153,7 @@ static void parse_proxystats(gdata_t *gdata, const int sockd, const char *buf)
 	res = yyjson_mut_doc_new(&ckyyalc);
 	yyjson_mut_doc_set_root(res, proxystats(res, proxy, true));
 out:
-	json_decref(val);
+	yyjson_doc_free(val);
 out_noval:
 	send_api_yyresponse(res, sockd);
 }

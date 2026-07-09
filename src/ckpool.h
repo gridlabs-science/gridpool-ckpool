@@ -369,20 +369,24 @@ yyjson_doc *yyjson_rpc_call(connsock_t *cs, const char *rpc_req);
 yyjson_doc *yyjson_rpc_response(connsock_t *cs, const char *rpc_req);
 void yyjson_rpc_msg(connsock_t *cs, const char *rpc_req);
 
-bool _send_json_msg(connsock_t *cs, const json_t *json_msg, const char *file, const char *func, const int line);
-#define send_json_msg(CS, JSON_MSG) _send_json_msg(CS, JSON_MSG, __FILE__, __func__, __LINE__)
 bool _send_yyjson_msg(connsock_t *cs, yyjson_mut_doc *doc, const char *file, const char *func, const int line);
 #define send_yyjson_msg(CS, DOC) _send_yyjson_msg(CS, DOC, __FILE__, __func__, __LINE__)
-json_t *json_msg_result(const char *msg, json_t **res_val, json_t **err_val);
+yyjson_doc *yyjson_msg_result(const char *msg, yyjson_val **res_val, yyjson_val **err_val);
 
-bool json_get_string(char **store, const json_t *val, const char *res);
-bool json_get_int64(int64_t *store, const json_t *val, const char *res);
-bool json_get_int(int *store, const json_t *val, const char *res);
-bool json_get_double(double *store, const json_t *val, const char *res);
-bool json_get_uint32(uint32_t *store, const json_t *val, const char *res);
-bool json_get_bool(bool *store, const json_t *val, const char *res);
-bool json_getdel_int(int *store, json_t *val, const char *res);
-bool json_getdel_int64(int64_t *store, json_t *val, const char *res);
+bool yyjson_obj_get_string(char **store, yyjson_val *val, const char *res);
+bool yyjson_obj_get_int64(int64_t *store, yyjson_val *val, const char *res);
+bool yyjson_obj_get_int(int *store, yyjson_val *val, const char *res);
+bool yyjson_obj_get_double(double *store, yyjson_val *val, const char *res);
+bool yyjson_obj_get_uint32(uint32_t *store, yyjson_val *val, const char *res);
+bool yyjson_obj_get_bool(bool *store, yyjson_val *val, const char *res);
+bool yyjson_mut_obj_get_string(char **store, yyjson_mut_val *val, const char *res);
+bool yyjson_mut_obj_get_int64(int64_t *store, yyjson_mut_val *val, const char *res);
+bool yyjson_mut_obj_get_int(int *store, yyjson_mut_val *val, const char *res);
+bool yyjson_mut_obj_get_double(double *store, yyjson_mut_val *val, const char *res);
+bool yyjson_mut_obj_get_uint32(uint32_t *store, yyjson_mut_val *val, const char *res);
+bool yyjson_mut_obj_get_bool(bool *store, yyjson_mut_val *val, const char *res);
+bool yyjson_mut_obj_getdel_int(int *store, yyjson_mut_val *val, const char *res);
+bool yyjson_mut_obj_getdel_int64(int64_t *store, yyjson_mut_val *val, const char *res);
 
 
 /* API Placeholders for future API implementation */
@@ -394,12 +398,7 @@ struct apimsg {
 };
 
 //static inline void ckpool_api(apimsg_t __maybe_unused *apimsg) {};
-static inline json_t *json_encode_errormsg(json_error_t __maybe_unused *err_val) { return NULL; };
-static inline json_t *json_errormsg(const char __maybe_unused *fmt, ...) { return NULL; };
-static inline void send_api_response(json_t __maybe_unused *val, const int __maybe_unused sockd) {};
-
-/* As above for the yyjson API equivalents */
-static inline yyjson_mut_doc *yyjson_encode_errormsg(json_error_t __maybe_unused *err_val) { return NULL; };
+static inline yyjson_mut_doc *yyjson_encode_errormsg(yyjson_read_err __maybe_unused *err_val) { return NULL; };
 static inline yyjson_mut_doc *yyjson_errormsg(const char __maybe_unused *fmt, ...) { return NULL; };
 static inline void send_api_yyresponse(yyjson_mut_doc *doc, const int __maybe_unused sockd)
 {

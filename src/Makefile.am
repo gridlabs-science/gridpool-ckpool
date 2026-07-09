@@ -1,7 +1,6 @@
-SUBDIRS	= jansson-2.14
 
 ACLOCAL_AMFLAGS = -I m4
-AM_CPPFLAGS =  -I$(top_srcdir)/src/jansson-2.14/src
+AM_CPPFLAGS = 
 
 native_objs :=
 
@@ -31,13 +30,13 @@ libckpool_a_LIBADD = $(native_objs)
 bin_PROGRAMS = ckpool ckpmsg notifier
 ckpool_SOURCES = ckpool.c generator.c bitcoin.c stratifier.c connector.c \
 		 yyjson.c yyjson_util.c
-ckpool_LDADD = libckpool.a @JANSSON_LIBS@ @LIBS@
+ckpool_LDADD = libckpool.a @LIBS@
 
 ckpmsg_SOURCES = ckpmsg.c
-ckpmsg_LDADD = libckpool.a @JANSSON_LIBS@
+ckpmsg_LDADD = libckpool.a
 
 notifier_SOURCES = notifier.c
-notifier_LDADD = libckpool.a @JANSSON_LIBS@
+notifier_LDADD = libckpool.a
 
 install-exec-hook:
 	setcap CAP_NET_BIND_SERVICE=+eip $(bindir)/ckpool

@@ -1291,40 +1291,6 @@ out:
 }
 
 
-/* Extracts a string value from a json array with error checking. To be used
- * when the value of the string returned is only examined and not to be stored.
- * See json_array_string below */
-const char *__json_array_string(json_t *val, unsigned int entry)
-{
-	json_t *arr_entry;
-
-	if (json_is_null(val))
-		return NULL;
-	if (!json_is_array(val))
-		return NULL;
-	if (entry > json_array_size(val))
-		return NULL;
-	arr_entry = json_array_get(val, entry);
-	if (!json_is_string(arr_entry))
-		return NULL;
-
-	return json_string_value(arr_entry);
-}
-
-/* Creates a freshly malloced dup of __json_array_string */
-char *json_array_string(json_t *val, unsigned int entry)
-{
-	const char *buf = __json_array_string(val, entry);
-
-	if (buf)
-		return strdup(buf);
-	return NULL;
-}
-
-json_t *json_object_dup(json_t *val, const char *entry)
-{
-	return json_copy(json_object_get(val, entry));
-}
 
 char *rotating_filename(const char *path, time_t when)
 {
@@ -1465,10 +1431,6 @@ void *_ckalloc(size_t len, const char *file, const char *func, const int line)
 	return ptr;
 }
 
-void *json_ckalloc(size_t size)
-{
-	return _ckalloc(size, __FILE__, __func__, __LINE__);
-}
 
 void *_ckzalloc(size_t len, const char *file, const char *func, const int line)
 {
@@ -2053,7 +2015,7 @@ void decay_time(double *f, double fadd, double fsecs, double interval)
 	*f += (fadd / fsecs * fprop);
 	*f /= ftotal;
 	/* Sanity check to prevent meaningless super small numbers that
-	 * eventually underflow libjansson's real number interpretation. */
+	 * eventually underflow the json real number interpretation. */
 	if (unlikely(*f < 2E-16))
 		*f = 0;
 }

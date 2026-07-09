@@ -19,7 +19,6 @@
 #include <fenv.h>
 #include <getopt.h>
 #include <grp.h>
-#include <jansson.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -917,39 +916,6 @@ static void terminate_oldpid(const proc_instance_t *pi, const pid_t oldpid)
 		quit(1, "Unable to kill old process %s pid %d", pi->processname, oldpid);
 }
 
-/* This is for blocking sends of json messages */
-bool _send_json_msg(connsock_t *cs, const json_t *json_msg, const char *file, const char *func, const int line)
-{
-	bool ret = false;
-	int len, sent;
-	char *s;
-
-	if (unlikely(!json_msg)) {
-		LOGWARNING("Empty json msg in send_json_msg from %s %s:%d", file, func, line);
-		goto out;
-	}
-	s = json_dumps(json_msg, JSON_ESCAPE_SLASH | JSON_EOL);
-	if (unlikely(!s)) {
-		LOGWARNING("Empty json dump in send_json_msg from %s %s:%d", file, func, line);
-		goto out;
-	}
-	LOGDEBUG("Sending json msg: %s", s);
-	len = strlen(s);
-	if (unlikely(!len)) {
-		LOGWARNING("Zero length string in send_json_msg from %s %s:%d", file, func, line);
-		goto out_free;
-	}
-	sent = write_socket(cs->fd, s, len);
-	if (sent != len) {
-		LOGNOTICE("Failed to send %d bytes sent %d in send_json_msg", len, sent);
-		goto out_free;
-	}
-	ret = true;
-out_free:
-	dealloc(s);
-out:
-	return ret;
-}
 
 /* As _send_json_msg but for yyjson docs */
 bool _send_yyjson_msg(connsock_t *cs, yyjson_mut_doc *doc, const char *file, const char *func, const int line)
@@ -981,58 +947,40 @@ out:
 	return ret;
 }
 
-/* Decode a string that should have a json message and return just the contents
- * of the result key or NULL. */
-static json_t *json_result(json_t *val)
-{
-	json_t *res_val = NULL, *err_val;
 
-	res_val = json_object_get(val, "result");
+
+
+/* As json_msg_result but parsing into an immutable yyjson doc */
+yyjson_doc *yyjson_msg_result(const char *msg, yyjson_val **res_val, yyjson_val **err_val)
+{
+	yyjson_val *root;
+	yyjson_doc *doc;
+
+	*res_val = *err_val = NULL;
+	doc = yyjson_read(msg, strlen(msg), 0);
+	if (!doc) {
+		LOGWARNING("Json decode failed: %s", msg);
+		return NULL;
+	}
+	root = yyjson_doc_get_root(doc);
+	*err_val = yyjson_obj_get(root, "error");
+	*res_val = yyjson_obj_get(root, "result");
 	/* (null) is a valid result while no value is an error, so mask out
 	 * (null) and only handle lack of result */
-	if (json_is_null(res_val))
-		res_val = NULL;
-	else if (!res_val) {
+	if (yyjson_is_null(*res_val))
+		*res_val = NULL;
+	else if (!*res_val) {
 		char *ss;
 
-		err_val = json_object_get(val, "error");
-		if (err_val)
-			ss = json_dumps(err_val, 0);
+		if (*err_val)
+			ss = yyjson_val_write(*err_val, 0, NULL);
 		else
 			ss = strdup("(unknown reason)");
 
 		LOGNOTICE("JSON-RPC decode of json_result failed: %s", ss);
 		free(ss);
 	}
-	return res_val;
-}
-
-/* Return the error value if one exists */
-static json_t *json_errval(json_t *val)
-{
-	json_t *err_val = json_object_get(val, "error");
-
-	return err_val;
-}
-
-/* Parse a string and return the json value it contains, if any, and the
- * result in res_val. Return NULL if no result key is found. */
-json_t *json_msg_result(const char *msg, json_t **res_val, json_t **err_val)
-{
-	json_error_t err;
-	json_t *val;
-
-	*res_val = NULL;
-	val = json_loads(msg, 0, &err);
-	if (!val) {
-		LOGWARNING("Json decode failed(%d): %s", err.line, err.text);
-		goto out;
-	}
-	*res_val = json_result(val);
-	*err_val = json_errval(val);
-
-out:
-	return val;
+	return doc;
 }
 
 /* Open the file in path, check if there is a pid in there that still exists
@@ -1122,37 +1070,33 @@ static void sighandler(const int sig)
 	shutdown(ckpool.main.us.sockd, SHUT_RDWR);
 }
 
-static bool _json_get_string(char **store, const json_t *entry, const char *res)
+
+
+/* As _json_get_string but for a yyjson entry that may not be within an
+ * object */
+static bool _yyjson_get_string(char **store, yyjson_val *entry, const char *res)
 {
-	bool ret = false;
 	const char *buf;
 
 	*store = NULL;
-	if (!entry || json_is_null(entry)) {
+	if (!entry || yyjson_is_null(entry)) {
 		LOGDEBUG("Json did not find entry %s", res);
-		goto out;
+		return false;
 	}
-	if (!json_is_string(entry)) {
+	if (!yyjson_is_str(entry)) {
 		LOGWARNING("Json entry %s is not a string", res);
-		goto out;
+		return false;
 	}
-	buf = json_string_value(entry);
+	buf = yyjson_get_str(entry);
 	LOGDEBUG("Json found entry %s: %s", res, buf);
 	*store = strdup(buf);
-	ret = true;
-out:
-	return ret;
-}
-
-bool json_get_string(char **store, const json_t *val, const char *res)
-{
-	return _json_get_string(store, json_object_get(val, res), res);
+	return true;
 }
 
 /* Used when there must be a valid string */
-static void json_get_configstring(char **store, const json_t *val, const char *res)
+static void json_get_configstring(char **store, yyjson_val *val, const char *res)
 {
-	bool ret = _json_get_string(store, json_object_get(val, res), res);
+	bool ret = _yyjson_get_string(store, yyjson_obj_get(val, res), res);
 
 	if (!ret) {
 		LOGEMERG("Invalid config string or missing object for %s", res);
@@ -1160,129 +1104,244 @@ static void json_get_configstring(char **store, const json_t *val, const char *r
 	}
 }
 
-bool json_get_int64(int64_t *store, const json_t *val, const char *res)
+
+
+
+
+
+
+
+/* As the json_get_* helpers above but for immutable yyjson objects */
+bool yyjson_obj_get_string(char **store, yyjson_val *val, const char *res)
 {
-	json_t *entry = json_object_get(val, res);
-	bool ret = false;
+	yyjson_val *entry = yyjson_obj_get(val, res);
+
+	*store = NULL;
+	if (!entry || yyjson_is_null(entry)) {
+		LOGDEBUG("Json did not find entry %s", res);
+		return false;
+	}
+	if (!yyjson_is_str(entry)) {
+		LOGWARNING("Json entry %s is not a string", res);
+		return false;
+	}
+	*store = strdup(yyjson_get_str(entry));
+	LOGDEBUG("Json found entry %s: %s", res, *store);
+	return true;
+}
+
+bool yyjson_obj_get_int64(int64_t *store, yyjson_val *val, const char *res)
+{
+	yyjson_val *entry = yyjson_obj_get(val, res);
 
 	if (!entry) {
 		LOGDEBUG("Json did not find entry %s", res);
-		goto out;
+		return false;
 	}
-	if (!json_is_integer(entry)) {
+	if (!yyjson_is_int(entry)) {
 		LOGINFO("Json entry %s is not an integer", res);
-		goto out;
+		return false;
 	}
-	*store = json_integer_value(entry);
+	*store = yyjson_get_sint(entry);
 	LOGDEBUG("Json found entry %s: %"PRId64, res, *store);
-	ret = true;
-out:
-	return ret;
+	return true;
 }
 
-bool json_get_int(int *store, const json_t *val, const char *res)
+bool yyjson_obj_get_int(int *store, yyjson_val *val, const char *res)
 {
-	json_t *entry = json_object_get(val, res);
-	bool ret = false;
+	yyjson_val *entry = yyjson_obj_get(val, res);
 
 	if (!entry) {
 		LOGDEBUG("Json did not find entry %s", res);
-		goto out;
+		return false;
 	}
-	if (!json_is_integer(entry)) {
+	if (!yyjson_is_int(entry)) {
 		LOGWARNING("Json entry %s is not an integer", res);
-		goto out;
+		return false;
 	}
-	*store = json_integer_value(entry);
+	*store = yyjson_get_sint(entry);
 	LOGDEBUG("Json found entry %s: %d", res, *store);
-	ret = true;
-out:
-	return ret;
+	return true;
 }
 
-bool json_get_double(double *store, const json_t *val, const char *res)
+bool yyjson_obj_get_double(double *store, yyjson_val *val, const char *res)
 {
-	json_t *entry = json_object_get(val, res);
-	bool ret = false;
+	yyjson_val *entry = yyjson_obj_get(val, res);
 
 	if (!entry) {
 		LOGDEBUG("Json did not find entry %s", res);
-		goto out;
+		return false;
 	}
-	if (!json_is_real(entry)) {
+	if (!yyjson_is_num(entry)) {
 		LOGWARNING("Json entry %s is not a double", res);
-		goto out;
+		return false;
 	}
-	*store = json_real_value(entry);
+	*store = yyjson_get_num(entry);
 	LOGDEBUG("Json found entry %s: %f", res, *store);
-	ret = true;
-out:
-	return ret;
+	return true;
 }
 
-bool json_get_uint32(uint32_t *store, const json_t *val, const char *res)
+bool yyjson_obj_get_uint32(uint32_t *store, yyjson_val *val, const char *res)
 {
-	json_t *entry = json_object_get(val, res);
-	bool ret = false;
+	yyjson_val *entry = yyjson_obj_get(val, res);
 
 	if (!entry) {
 		LOGDEBUG("Json did not find entry %s", res);
-		goto out;
+		return false;
 	}
-	if (!json_is_integer(entry)) {
+	if (!yyjson_is_int(entry)) {
 		LOGWARNING("Json entry %s is not an integer", res);
-		goto out;
+		return false;
 	}
-	*store = json_integer_value(entry);
+	*store = (uint32_t)yyjson_get_uint(entry);
 	LOGDEBUG("Json found entry %s: %u", res, *store);
-	ret = true;
-out:
-	return ret;
+	return true;
 }
 
-bool json_get_bool(bool *store, const json_t *val, const char *res)
+bool yyjson_obj_get_bool(bool *store, yyjson_val *val, const char *res)
 {
-	json_t *entry = json_object_get(val, res);
-	bool ret = false;
+	yyjson_val *entry = yyjson_obj_get(val, res);
 
 	if (!entry) {
 		LOGDEBUG("Json did not find entry %s", res);
-		goto out;
+		return false;
 	}
-	if (!json_is_boolean(entry)) {
+	if (!yyjson_is_bool(entry)) {
 		LOGINFO("Json entry %s is not a boolean", res);
-		goto out;
+		return false;
 	}
-	*store = json_is_true(entry);
+	*store = yyjson_get_bool(entry);
 	LOGDEBUG("Json found entry %s: %s", res, *store ? "true" : "false");
-	ret = true;
-out:
-	return ret;
+	return true;
 }
 
-bool json_getdel_int(int *store, json_t *val, const char *res)
+/* As above but for mutable yyjson objects */
+bool yyjson_mut_obj_get_string(char **store, yyjson_mut_val *val, const char *res)
+{
+	yyjson_mut_val *entry = yyjson_mut_obj_get(val, res);
+
+	*store = NULL;
+	if (!entry || yyjson_mut_is_null(entry)) {
+		LOGDEBUG("Json did not find entry %s", res);
+		return false;
+	}
+	if (!yyjson_mut_is_str(entry)) {
+		LOGWARNING("Json entry %s is not a string", res);
+		return false;
+	}
+	*store = strdup(yyjson_mut_get_str(entry));
+	LOGDEBUG("Json found entry %s: %s", res, *store);
+	return true;
+}
+
+bool yyjson_mut_obj_get_int64(int64_t *store, yyjson_mut_val *val, const char *res)
+{
+	yyjson_mut_val *entry = yyjson_mut_obj_get(val, res);
+
+	if (!entry) {
+		LOGDEBUG("Json did not find entry %s", res);
+		return false;
+	}
+	if (!yyjson_mut_is_int(entry)) {
+		LOGINFO("Json entry %s is not an integer", res);
+		return false;
+	}
+	*store = yyjson_mut_get_sint(entry);
+	LOGDEBUG("Json found entry %s: %"PRId64, res, *store);
+	return true;
+}
+
+bool yyjson_mut_obj_get_int(int *store, yyjson_mut_val *val, const char *res)
+{
+	yyjson_mut_val *entry = yyjson_mut_obj_get(val, res);
+
+	if (!entry) {
+		LOGDEBUG("Json did not find entry %s", res);
+		return false;
+	}
+	if (!yyjson_mut_is_int(entry)) {
+		LOGWARNING("Json entry %s is not an integer", res);
+		return false;
+	}
+	*store = yyjson_mut_get_sint(entry);
+	LOGDEBUG("Json found entry %s: %d", res, *store);
+	return true;
+}
+
+bool yyjson_mut_obj_get_double(double *store, yyjson_mut_val *val, const char *res)
+{
+	yyjson_mut_val *entry = yyjson_mut_obj_get(val, res);
+
+	if (!entry) {
+		LOGDEBUG("Json did not find entry %s", res);
+		return false;
+	}
+	if (!yyjson_mut_is_num(entry)) {
+		LOGWARNING("Json entry %s is not a double", res);
+		return false;
+	}
+	*store = yyjson_mut_get_num(entry);
+	LOGDEBUG("Json found entry %s: %f", res, *store);
+	return true;
+}
+
+bool yyjson_mut_obj_get_uint32(uint32_t *store, yyjson_mut_val *val, const char *res)
+{
+	yyjson_mut_val *entry = yyjson_mut_obj_get(val, res);
+
+	if (!entry) {
+		LOGDEBUG("Json did not find entry %s", res);
+		return false;
+	}
+	if (!yyjson_mut_is_int(entry)) {
+		LOGWARNING("Json entry %s is not an integer", res);
+		return false;
+	}
+	*store = (uint32_t)yyjson_mut_get_uint(entry);
+	LOGDEBUG("Json found entry %s: %u", res, *store);
+	return true;
+}
+
+bool yyjson_mut_obj_get_bool(bool *store, yyjson_mut_val *val, const char *res)
+{
+	yyjson_mut_val *entry = yyjson_mut_obj_get(val, res);
+
+	if (!entry) {
+		LOGDEBUG("Json did not find entry %s", res);
+		return false;
+	}
+	if (!yyjson_mut_is_bool(entry)) {
+		LOGINFO("Json entry %s is not a boolean", res);
+		return false;
+	}
+	*store = yyjson_mut_get_bool(entry);
+	LOGDEBUG("Json found entry %s: %s", res, *store ? "true" : "false");
+	return true;
+}
+
+bool yyjson_mut_obj_getdel_int(int *store, yyjson_mut_val *val, const char *res)
 {
 	bool ret;
 
-	ret = json_get_int(store, val, res);
+	ret = yyjson_mut_obj_get_int(store, val, res);
 	if (ret)
-		json_object_del(val, res);
+		yyjson_mut_obj_remove_key(val, res);
 	return ret;
 }
 
-bool json_getdel_int64(int64_t *store, json_t *val, const char *res)
+bool yyjson_mut_obj_getdel_int64(int64_t *store, yyjson_mut_val *val, const char *res)
 {
 	bool ret;
 
-	ret = json_get_int64(store, val, res);
+	ret = yyjson_mut_obj_get_int64(store, val, res);
 	if (ret)
-		json_object_del(val, res);
+		yyjson_mut_obj_remove_key(val, res);
 	return ret;
 }
 
-static void parse_btcds(const json_t *arr_val, const int arr_size)
+static void parse_btcds(yyjson_val *arr_val, const int arr_size)
 {
-	json_t *val;
+	yyjson_val *val;
 	int i;
 
 	ckpool.btcds = arr_size;
@@ -1291,17 +1350,17 @@ static void parse_btcds(const json_t *arr_val, const int arr_size)
 	ckpool.btcdpass = ckzalloc(sizeof(char *) * arr_size);
 	ckpool.btcdnotify = ckzalloc(sizeof(bool *) * arr_size);
 	for (i = 0; i < arr_size; i++) {
-		val = json_array_get(arr_val, i);
+		val = yyjson_arr_get(arr_val, i);
 		json_get_configstring(&ckpool.btcdurl[i], val, "url");
 		json_get_configstring(&ckpool.btcdauth[i], val, "auth");
 		json_get_configstring(&ckpool.btcdpass[i], val, "pass");
-		json_get_bool(&ckpool.btcdnotify[i], val, "notify");
+		yyjson_obj_get_bool(&ckpool.btcdnotify[i], val, "notify");
 	}
 }
 
-static void parse_proxies(const json_t *arr_val, const int arr_size)
+static void parse_proxies(yyjson_val *arr_val, const int arr_size)
 {
-	json_t *val;
+	yyjson_val *val;
 	int i;
 
 	ckpool.proxies = arr_size;
@@ -1309,26 +1368,26 @@ static void parse_proxies(const json_t *arr_val, const int arr_size)
 	ckpool.proxyauth = ckzalloc(sizeof(char *) * arr_size);
 	ckpool.proxypass = ckzalloc(sizeof(char *) * arr_size);
 	for (i = 0; i < arr_size; i++) {
-		val = json_array_get(arr_val, i);
+		val = yyjson_arr_get(arr_val, i);
 		json_get_configstring(&ckpool.proxyurl[i], val, "url");
 		json_get_configstring(&ckpool.proxyauth[i], val, "auth");
-		if (!json_get_string(&ckpool.proxypass[i], val, "pass"))
+		if (!yyjson_obj_get_string(&ckpool.proxypass[i], val, "pass"))
 			ckpool.proxypass[i] = strdup("");
 	}
 }
 
-static bool parse_serverurls(const json_t *arr_val)
+static bool parse_serverurls(yyjson_val *arr_val)
 {
 	bool ret = false;
 	int arr_size, i;
 
 	if (!arr_val)
 		goto out;
-	if (!json_is_array(arr_val)) {
+	if (!yyjson_is_arr(arr_val)) {
 		LOGINFO("Unable to parse serverurl entries as an array");
 		goto out;
 	}
-	arr_size = json_array_size(arr_val);
+	arr_size = yyjson_arr_size(arr_val);
 	if (!arr_size) {
 		LOGWARNING("Serverurl array empty");
 		goto out;
@@ -1339,9 +1398,9 @@ static bool parse_serverurls(const json_t *arr_val)
 	ckpool.nodeserver = ckzalloc(sizeof(bool) * arr_size);
 	ckpool.trusted = ckzalloc(sizeof(bool) * arr_size);
 	for (i = 0; i < arr_size; i++) {
-		json_t *val = json_array_get(arr_val, i);
+		yyjson_val *val = yyjson_arr_get(arr_val, i);
 
-		if (!_json_get_string(&ckpool.serverurl[i], val, "serverurl"))
+		if (!_yyjson_get_string(&ckpool.serverurl[i], val, "serverurl"))
 			LOGWARNING("Invalid serverurl entry number %d", i);
 	}
 	ret = true;
@@ -1349,17 +1408,17 @@ out:
 	return ret;
 }
 
-static void parse_nodeservers(const json_t *arr_val)
+static void parse_nodeservers(yyjson_val *arr_val)
 {
 	int arr_size, i, j, total_urls;
 
 	if (!arr_val)
 		return;
-	if (!json_is_array(arr_val)) {
+	if (!yyjson_is_arr(arr_val)) {
 		LOGWARNING("Unable to parse nodeservers entries as an array");
 		return;
 	}
-	arr_size = json_array_size(arr_val);
+	arr_size = yyjson_arr_size(arr_val);
 	if (!arr_size) {
 		LOGWARNING("Nodeserver array empty");
 		return;
@@ -1369,9 +1428,9 @@ static void parse_nodeservers(const json_t *arr_val)
 	ckpool.nodeserver = realloc(ckpool.nodeserver, sizeof(bool) * total_urls);
 	ckpool.trusted = realloc(ckpool.trusted, sizeof(bool) * total_urls);
 	for (i = 0, j = ckpool.serverurls; j < total_urls; i++, j++) {
-		json_t *val = json_array_get(arr_val, i);
+		yyjson_val *val = yyjson_arr_get(arr_val, i);
 
-		if (!_json_get_string(&ckpool.serverurl[j], val, "nodeserver"))
+		if (!_yyjson_get_string(&ckpool.serverurl[j], val, "nodeserver"))
 			LOGWARNING("Invalid nodeserver entry number %d", i);
 		ckpool.nodeserver[j] = true;
 		ckpool.nodeservers++;
@@ -1379,17 +1438,17 @@ static void parse_nodeservers(const json_t *arr_val)
 	ckpool.serverurls = total_urls;
 }
 
-static void parse_trusted(const json_t *arr_val)
+static void parse_trusted(yyjson_val *arr_val)
 {
 	int arr_size, i, j, total_urls;
 
 	if (!arr_val)
 		return;
-	if (!json_is_array(arr_val)) {
+	if (!yyjson_is_arr(arr_val)) {
 		LOGWARNING("Unable to parse trusted server entries as an array");
 		return;
 	}
-	arr_size = json_array_size(arr_val);
+	arr_size = yyjson_arr_size(arr_val);
 	if (!arr_size) {
 		LOGWARNING("Trusted array empty");
 		return;
@@ -1399,9 +1458,9 @@ static void parse_trusted(const json_t *arr_val)
 	ckpool.nodeserver = realloc(ckpool.nodeserver, sizeof(bool) * total_urls);
 	ckpool.trusted = realloc(ckpool.trusted, sizeof(bool) * total_urls);
 	for (i = 0, j = ckpool.serverurls; j < total_urls; i++, j++) {
-		json_t *val = json_array_get(arr_val, i);
+		yyjson_val *val = yyjson_arr_get(arr_val, i);
 
-		if (!_json_get_string(&ckpool.serverurl[j], val, "trusted"))
+		if (!_yyjson_get_string(&ckpool.serverurl[j], val, "trusted"))
 			LOGWARNING("Invalid trusted server entry number %d", i);
 		ckpool.trusted[j] = true;
 	}
@@ -1409,7 +1468,7 @@ static void parse_trusted(const json_t *arr_val)
 }
 
 
-static bool parse_redirecturls(const json_t *arr_val)
+static bool parse_redirecturls(yyjson_val *arr_val)
 {
 	bool ret = false;
 	int arr_size, i;
@@ -1418,11 +1477,11 @@ static bool parse_redirecturls(const json_t *arr_val)
 
 	if (!arr_val)
 		goto out;
-	if (!json_is_array(arr_val)) {
+	if (!yyjson_is_arr(arr_val)) {
 		LOGNOTICE("Unable to parse redirecturl entries as an array");
 		goto out;
 	}
-	arr_size = json_array_size(arr_val);
+	arr_size = yyjson_arr_size(arr_val);
 	if (!arr_size) {
 		LOGWARNING("redirecturl array empty");
 		goto out;
@@ -1431,9 +1490,9 @@ static bool parse_redirecturls(const json_t *arr_val)
 	ckpool.redirecturl = ckalloc(sizeof(char *) * arr_size);
 	ckpool.redirectport = ckalloc(sizeof(char *) * arr_size);
 	for (i = 0; i < arr_size; i++) {
-		json_t *val = json_array_get(arr_val, i);
+		yyjson_val *val = yyjson_arr_get(arr_val, i);
 
-		strncpy(redirecturl, json_string_value(val), INET6_ADDRSTRLEN - 1);
+		strncpy(redirecturl, yyjson_get_str(val), INET6_ADDRSTRLEN - 1);
 		/* See that the url properly resolves */
 		if (!url_from_serverurl(redirecturl, url, port))
 			quit(1, "Invalid redirecturl entry %d %s", i, redirecturl);
@@ -1448,34 +1507,36 @@ out:
 
 static void parse_config(void)
 {
-	json_t *json_conf, *arr_val;
+	yyjson_val *json_conf, *arr_val;
 	char *url, *vmask = NULL;
-	json_error_t err_val;
+	yyjson_read_err err_val;
+	yyjson_doc *doc;
 	int arr_size;
 
-	json_conf = json_load_file(ckpool.config, JSON_DISABLE_EOF_CHECK, &err_val);
-	if (!json_conf) {
-		LOGWARNING("Json decode error for config file %s: (%d): %s", ckpool.config,
-			   err_val.line, err_val.text);
+	doc = yyjson_read_file(ckpool.config, YYJSON_READ_STOP_WHEN_DONE, NULL, &err_val);
+	if (!doc) {
+		LOGWARNING("Json decode error for config file %s: (%zu): %s", ckpool.config,
+			   err_val.pos, err_val.msg);
 		return;
 	}
-	arr_val = json_object_get(json_conf, "btcd");
-	if (arr_val && json_is_array(arr_val)) {
-		arr_size = json_array_size(arr_val);
+	json_conf = yyjson_doc_get_root(doc);
+	arr_val = yyjson_obj_get(json_conf, "btcd");
+	if (arr_val && yyjson_is_arr(arr_val)) {
+		arr_size = yyjson_arr_size(arr_val);
 		if (arr_size)
 			parse_btcds(arr_val, arr_size);
 	}
-	json_get_string(&ckpool.btcaddress, json_conf, "btcaddress");
-	json_get_string(&ckpool.btcsig, json_conf, "btcsig");
+	yyjson_obj_get_string(&ckpool.btcaddress, json_conf, "btcaddress");
+	yyjson_obj_get_string(&ckpool.btcsig, json_conf, "btcsig");
 	if (ckpool.btcsig && strlen(ckpool.btcsig) > 38) {
 		LOGWARNING("Signature %s too long, truncating to 38 bytes", ckpool.btcsig);
 		ckpool.btcsig[38] = '\0';
 	}
-	json_get_int(&ckpool.blockpoll, json_conf, "blockpoll");
-	json_get_int(&ckpool.nonce1length, json_conf, "nonce1length");
-	json_get_int(&ckpool.nonce2length, json_conf, "nonce2length");
-	json_get_int(&ckpool.update_interval, json_conf, "update_interval");
-	json_get_string(&vmask, json_conf, "version_mask");
+	yyjson_obj_get_int(&ckpool.blockpoll, json_conf, "blockpoll");
+	yyjson_obj_get_int(&ckpool.nonce1length, json_conf, "nonce1length");
+	yyjson_obj_get_int(&ckpool.nonce2length, json_conf, "nonce2length");
+	yyjson_obj_get_int(&ckpool.update_interval, json_conf, "update_interval");
+	yyjson_obj_get_string(&vmask, json_conf, "version_mask");
 	if (vmask && strlen(vmask) && validhex(vmask))
 		sscanf(vmask, "%x", &ckpool.version_mask);
 	else
@@ -1483,45 +1544,45 @@ static void parse_config(void)
 	dealloc(vmask);
 
 	/* Default don't drop idle clients */
-	json_get_int(&ckpool.dropidle, json_conf, "dropidle");
+	yyjson_obj_get_int(&ckpool.dropidle, json_conf, "dropidle");
 	/* Look for an array first and then a single entry */
-	arr_val = json_object_get(json_conf, "serverurl");
+	arr_val = yyjson_obj_get(json_conf, "serverurl");
 	if (!parse_serverurls(arr_val)) {
-		if (json_get_string(&url, json_conf, "serverurl")) {
+		if (yyjson_obj_get_string(&url, json_conf, "serverurl")) {
 			ckpool.serverurl = ckalloc(sizeof(char *));
 			ckpool.serverurl[0] = url;
 			ckpool.serverurls = 1;
 		}
 	}
-	arr_val = json_object_get(json_conf, "nodeserver");
+	arr_val = yyjson_obj_get(json_conf, "nodeserver");
 	parse_nodeservers(arr_val);
-	arr_val = json_object_get(json_conf, "trusted");
+	arr_val = yyjson_obj_get(json_conf, "trusted");
 	parse_trusted(arr_val);
-	json_get_string(&ckpool.upstream, json_conf, "upstream");
-	json_get_int64(&ckpool.mindiff, json_conf, "mindiff");
-	json_get_int64(&ckpool.startdiff, json_conf, "startdiff");
-	json_get_int64(&ckpool.highdiff, json_conf, "highdiff");
-	json_get_int64(&ckpool.maxdiff, json_conf, "maxdiff");
-	json_get_string(&ckpool.logdir, json_conf, "logdir");
-	json_get_int(&ckpool.maxclients, json_conf, "maxclients");
-	json_get_double(&ckpool.donation, json_conf, "donation");
+	yyjson_obj_get_string(&ckpool.upstream, json_conf, "upstream");
+	yyjson_obj_get_int64(&ckpool.mindiff, json_conf, "mindiff");
+	yyjson_obj_get_int64(&ckpool.startdiff, json_conf, "startdiff");
+	yyjson_obj_get_int64(&ckpool.highdiff, json_conf, "highdiff");
+	yyjson_obj_get_int64(&ckpool.maxdiff, json_conf, "maxdiff");
+	yyjson_obj_get_string(&ckpool.logdir, json_conf, "logdir");
+	yyjson_obj_get_int(&ckpool.maxclients, json_conf, "maxclients");
+	yyjson_obj_get_double(&ckpool.donation, json_conf, "donation");
 	/* Avoid dust-sized donations */
 	if (ckpool.donation < 0.1)
 		ckpool.donation = 0;
 	else if (ckpool.donation > 99.9)
 		ckpool.donation = 99.9;
-	arr_val = json_object_get(json_conf, "proxy");
-	if (arr_val && json_is_array(arr_val)) {
-		arr_size = json_array_size(arr_val);
+	arr_val = yyjson_obj_get(json_conf, "proxy");
+	if (arr_val && yyjson_is_arr(arr_val)) {
+		arr_size = yyjson_arr_size(arr_val);
 		if (arr_size)
 			parse_proxies(arr_val, arr_size);
 	}
-	arr_val = json_object_get(json_conf, "redirecturl");
+	arr_val = yyjson_obj_get(json_conf, "redirecturl");
 	if (arr_val)
 		parse_redirecturls(arr_val);
-	json_get_string(&ckpool.zmqblock, json_conf, "zmqblock");
+	yyjson_obj_get_string(&ckpool.zmqblock, json_conf, "zmqblock");
 
-	json_decref(json_conf);
+	yyjson_doc_free(doc);
 }
 
 static void manage_old_instance(proc_instance_t *pi)
@@ -1610,7 +1671,6 @@ int main(int argc, char **argv)
 
 	/* Make significant floating point errors fatal to avoid subtle bugs being missed */
 	feenableexcept(FE_DIVBYZERO | FE_INVALID);
-	json_set_alloc_funcs(json_ckalloc, free);
 
 	ckpool.starttime = time(NULL);
 	ckpool.startpid = getpid();

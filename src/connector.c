@@ -481,13 +481,13 @@ static void send_client(cdata_t *cdata, int64_t id, char *buf);
 
 /* Look for shares being submitted via a redirector and add them to a linked
  * list for looking up the responses. */
-static void parse_redirector_share(cdata_t *cdata, client_instance_t *client, const json_t *val)
+static void parse_redirector_share(cdata_t *cdata, client_instance_t *client, yyjson_mut_val *val)
 {
 	share_t *share, *tmp;
 	time_t now;
 	int64_t id;
 
-	if (!json_get_int64(&id, val, "id")) {
+	if (!yyjson_mut_obj_get_int64(&id, val, "id")) {
 		LOGNOTICE("Failed to find redirector share id");
 		return;
 	}
@@ -574,12 +574,8 @@ reparse:
 			yyjson_mut_obj_remove_key(root, "client_id");
 			yyjson_mut_obj_add_sint(doc, root, "client_id", passthrough_id);
 		} else {
-			if (ckpool.redirector && !client->redirected && strstr(client->buf, "mining.submit")) {
-				json_t *val = yyjson_to_json(doc);
-
-				parse_redirector_share(cdata, client, val);
-				json_decref(val);
-			}
+			if (ckpool.redirector && !client->redirected && strstr(client->buf, "mining.submit"))
+				parse_redirector_share(cdata, client, root);
 			yyjson_mut_obj_add_sint(doc, root, "client_id", client->id);
 			yyjson_mut_obj_add_str(doc, root, "address", client->address_name);
 		}
@@ -953,17 +949,19 @@ static void redirect_client(client_instance_t *client)
  * client to a protected server. */
 static bool test_redirector_shares(cdata_t *cdata, client_instance_t *client, const char *buf)
 {
-	json_t *val = json_loads(buf, 0, NULL);
+	yyjson_doc *doc = yyjson_read(buf, strlen(buf), 0);
 	share_t *share, *found = NULL;
+	yyjson_val *val;
 	bool ret = false;
 	int64_t id;
 
-	if (!val) {
+	if (!doc) {
 		/* Can happen when responding to invalid json from client */
 		LOGINFO("Invalid json response to client %"PRId64 "%s", client->id, buf);
 		return ret;
 	}
-	if (!json_get_int64(&id, val, "id")) {
+	val = yyjson_doc_get_root(doc);
+	if (!yyjson_obj_get_int64(&id, val, "id")) {
 		LOGINFO("Failed to find response id");
 		goto out;
 	}
@@ -983,20 +981,20 @@ static bool test_redirector_shares(cdata_t *cdata, client_instance_t *client, co
 		bool result = false;
 
 		{
-			json_t *res_val = json_object_get(val, "result");
+			yyjson_val *res_val = yyjson_obj_get(val, "result");
 
-			if (!json_is_boolean(res_val)) {
-				json_t *err_val = json_object_get(val, "error");
+			if (!yyjson_is_bool(res_val)) {
+				yyjson_val *err_val = yyjson_obj_get(val, "error");
 
-				if (unlikely(!(json_is_null(res_val) && err_val && !json_is_null(err_val)))) {
+				if (unlikely(!(yyjson_is_null(res_val) && err_val && !yyjson_is_null(err_val)))) {
 					LOGINFO("Failed to find result in trs share");
 					goto out;
 				}
 				result = false;
 			} else
-				result = json_is_true(res_val);
+				result = yyjson_get_bool(res_val);
 		}
-		if (!json_is_null(json_object_get(val, "error"))) {
+		if (!yyjson_is_null(yyjson_obj_get(val, "error"))) {
 			LOGINFO("Got error for trs share");
 			goto out;
 		}
@@ -1017,7 +1015,7 @@ static bool test_redirector_shares(cdata_t *cdata, client_instance_t *client, co
 		ck_wunlock(&cdata->lock);
 	}
 out:
-	json_decref(val);
+	yyjson_doc_free(doc);
 	return ret;
 }
 
@@ -1167,7 +1165,8 @@ static void passthrough_client(cdata_t *cdata, client_instance_t *client)
 
 static bool connect_upstream(connsock_t *cs)
 {
-	json_t *val = NULL, *res_val, *err_val;
+	yyjson_val *res_val, *err_val;
+	yyjson_doc *val = NULL;
 	bool res, ret = false;
 	yyjson_mut_doc *req;
 	float timeout = 10;
@@ -1199,13 +1198,13 @@ static bool connect_upstream(connsock_t *cs)
 		LOGWARNING("Failed to receive line in connect_upstream");
 		goto out;
 	}
-	val = json_msg_result(cs->buf, &res_val, &err_val);
+	val = yyjson_msg_result(cs->buf, &res_val, &err_val);
 	if (!val || !res_val) {
 		LOGWARNING("Failed to get a json result in connect_upstream, got: %s",
 			 cs->buf);
 		goto out;
 	}
-	ret = json_is_true(res_val);
+	ret = yyjson_is_true(res_val);
 	if (!ret) {
 		LOGWARNING("Denied upstream trusted connection");
 		goto out;
@@ -1215,7 +1214,7 @@ static bool connect_upstream(connsock_t *cs)
 	ret = true;
 out:
 	if (val)
-		json_decref(val);
+		yyjson_doc_free(val);
 	cksem_post(&cs->sem);
 
 	return ret;
@@ -1268,9 +1267,11 @@ static void *urecv_process(void __maybe_unused *arg)
 	pthread_detach(pthread_self());
 
 	while (42) {
+		yyjson_mut_val *root;
+		yyjson_mut_doc *doc;
 		const char *method;
 		float timeout = 5;
-		json_t *val;
+		yyjson_doc *idoc;
 		int ret;
 
 		cksem_wait(&cs->sem);
@@ -1286,35 +1287,37 @@ static void *urecv_process(void __maybe_unused *arg)
 			goto nomsg;
 		}
 		alive = true;
-		val = json_loads(cs->buf, 0, NULL);
-		if (unlikely(!val)) {
+		idoc = yyjson_read(cs->buf, strlen(cs->buf), 0);
+		if (unlikely(!idoc)) {
 			LOGWARNING("Received non-json msg from upstream pool %s",
 				   cs->buf);
 			goto nomsg;
 		}
-		method = json_string_value(json_object_get(val, "method"));
+		doc = yyjson_doc_mut_copy(idoc, &ckyyalc);
+		yyjson_doc_free(idoc);
+		root = yyjson_mut_doc_get_root(doc);
+		method = yyjson_mut_get_str(yyjson_mut_obj_get(root, "method"));
 		if (unlikely(!method)) {
 			LOGWARNING("Failed to find method from upstream pool json %s",
 				   cs->buf);
-			json_decref(val);
 			goto decref;
 		}
 		if (!safecmp(method, stratum_msgs[SM_TRANSACTIONS]))
-			parse_upstream_txns(val);
+			parse_upstream_txns(root);
 		else if (!safecmp(method, stratum_msgs[SM_AUTHRESULT]))
-			parse_upstream_auth(val);
+			parse_upstream_auth(root);
 		else if (!safecmp(method, stratum_msgs[SM_WORKINFO]))
-			parse_upstream_workinfo(val);
+			parse_upstream_workinfo(root);
 		else if (!safecmp(method, stratum_msgs[SM_BLOCK]))
-			parse_upstream_block(val);
+			parse_upstream_block(doc, root);
 		else if (!safecmp(method, stratum_msgs[SM_REQTXNS]))
-			parse_upstream_reqtxns(val);
+			parse_upstream_reqtxns(root);
 		else if (!safecmp(method, "pong"))
 			LOGDEBUG("Received upstream pong");
 		else
 			LOGWARNING("Unrecognised upstream method %s", method);
 decref:
-		json_decref(val);
+		yyjson_mut_doc_free(doc);
 nomsg:
 		cksem_post(&cs->sem);
 
@@ -1384,16 +1387,6 @@ static void client_yymessage_processor(yyjson_mut_doc *doc)
 		dec_instance_ref(cdata, client);
 	}
 	send_client_yyjson(cdata, client_id, doc);
-}
-
-void connector_add_message(json_t *val)
-{
-	cdata_t *cdata = ckpool.cdata;
-	yyjson_mut_doc *doc = json_to_yyjson(val);
-
-	json_decref(val);
-	if (likely(doc))
-		ckmsgq_add(cdata->cympq, doc);
 }
 
 void _connector_add_yymessage(yyjson_mut_doc *doc, const char *file,

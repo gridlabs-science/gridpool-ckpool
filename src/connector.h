@@ -12,7 +12,6 @@
 
 int64_t connector_newclientid(void);
 void connector_upstream_msg(char *msg);
-void connector_add_message(json_t *val);
 void _connector_add_yymessage(yyjson_mut_doc *doc, const char *file,
 			     const char *func, const int line);
 #define connector_add_yymessage(doc) \
