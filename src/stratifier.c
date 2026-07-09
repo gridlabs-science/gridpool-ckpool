@@ -915,6 +915,26 @@ static void upstream_msgtype(const json_t *val, const int msg_type)
 	json_decref(json_msg);
 }
 
+/* Send a yyjson doc msg to an upstream trusted remote server */
+static void upstream_yyjson(yyjson_mut_doc *doc)
+{
+	char *msg = yyjson_mut_write(doc, YYJSON_WRITE_NEWLINE_AT_END, NULL);
+
+	/* Connector absorbs and frees msg */
+	connector_upstream_msg(msg);
+}
+
+/* Upstream a yyjson doc msgtype, duplicating the doc */
+static void upstream_yydoc_msgtype(yyjson_mut_doc *doc, const int msg_type)
+{
+	yyjson_mut_doc *copy = yyjson_mut_doc_mut_copy(doc, &ckyyalc);
+	yyjson_mut_val *root = yyjson_mut_doc_get_root(copy);
+
+	yyjson_mut_obj_add_strcpy(copy, root, "method", stratum_msgs[msg_type]);
+	upstream_yyjson(copy);
+	yyjson_mut_doc_free(copy);
+}
+
 static void send_node_workinfo(sdata_t *sdata, const workbase_t *wb)
 {
 	stratum_instance_t *client;
@@ -989,29 +1009,30 @@ static void send_node_workinfo(sdata_t *sdata, const workbase_t *wb)
 	}
 }
 
+/* Still built with jansson as it's tied to the jansson remote workbase
+ * message handling */
 static json_t *generate_workinfo(const workbase_t *wb, const char *func)
 {
+	json_t *val = json_object();
 	char cdfield[64];
-	json_t *val;
 
 	sprintf(cdfield, "%lu,%lu", wb->gentime.tv_sec, wb->gentime.tv_nsec);
 
-	JSON_CPACK(val, "{sI,ss,ss,ss,ss,ss,ss,ss,ss,sI,so,ss,ss,ss,ss}",
-			"workinfoid", wb->id,
-			"poolinstance", ckpool.name,
-			"transactiontree", wb->txn_hashes,
-			"prevhash", wb->prevhash,
-			"coinbase1", wb->coinb1,
-			"coinbase2", wb->coinb2,
-			"version", wb->bbversion,
-			"ntime", wb->ntime,
-			"bits", wb->nbit,
-			"reward", wb->coinbasevalue,
-			"merklehash", json_deep_copy(wb->merkle_array),
-			"createdate", cdfield,
-			"createby", "code",
-			"createcode", func,
-			"createinet", ckpool.serverurl[0]);
+	json_set_int64(val, "workinfoid", wb->id);
+	json_set_string(val, "poolinstance", ckpool.name);
+	json_set_string(val, "transactiontree", wb->txn_hashes);
+	json_set_string(val, "prevhash", wb->prevhash);
+	json_set_string(val, "coinbase1", wb->coinb1);
+	json_set_string(val, "coinbase2", wb->coinb2);
+	json_set_string(val, "version", wb->bbversion);
+	json_set_string(val, "ntime", wb->ntime);
+	json_set_string(val, "bits", wb->nbit);
+	json_set_int64(val, "reward", wb->coinbasevalue);
+	json_object_set_new_nocheck(val, "merklehash", json_deep_copy(wb->merkle_array));
+	json_set_string(val, "createdate", cdfield);
+	json_set_string(val, "createby", "code");
+	json_set_string(val, "createcode", func);
+	json_set_string(val, "createinet", ckpool.serverurl[0]);
 	return val;
 }
 
@@ -1231,33 +1252,36 @@ static bool add_txn(sdata_t *sdata, txntable_t **txns, const char *hash,
 	return true;
 }
 
-static void send_node_transactions(sdata_t *sdata, const json_t *txn_val)
+static void send_node_transactions(sdata_t *sdata, yyjson_mut_doc *txn_doc)
 {
 	stratum_instance_t *client;
 	ckmsg_t *bulk_send = NULL;
 	ckmsg_t *client_msg;
+	yyjson_mut_val *root;
+	yyjson_mut_doc *doc;
 	int messages = 0;
-	json_t *json_msg;
 	smsg_t *msg;
 
 	ck_rlock(&sdata->instance_lock);
 	DL_FOREACH2(sdata->node_instances, client, node_next) {
-		json_msg = json_deep_copy(txn_val);
-		json_set_string(json_msg, "node.method", stratum_msgs[SM_TRANSACTIONS]);
+		doc = yyjson_mut_doc_mut_copy(txn_doc, &ckyyalc);
+		root = yyjson_mut_doc_get_root(doc);
+		yyjson_mut_obj_add_strcpy(doc, root, "node.method", stratum_msgs[SM_TRANSACTIONS]);
 		client_msg = ckalloc(sizeof(ckmsg_t));
 		msg = ckzalloc(sizeof(smsg_t));
-		msg->json_msg = json_msg;
+		msg->doc = doc;
 		msg->client_id = client->id;
 		client_msg->data = msg;
 		DL_APPEND(bulk_send, client_msg);
 		messages++;
 	}
 	DL_FOREACH2(sdata->remote_instances, client, remote_next) {
-		json_msg = json_deep_copy(txn_val);
-		json_set_string(json_msg, "method", stratum_msgs[SM_TRANSACTIONS]);
+		doc = yyjson_mut_doc_mut_copy(txn_doc, &ckyyalc);
+		root = yyjson_mut_doc_get_root(doc);
+		yyjson_mut_obj_add_strcpy(doc, root, "method", stratum_msgs[SM_TRANSACTIONS]);
 		client_msg = ckalloc(sizeof(ckmsg_t));
 		msg = ckzalloc(sizeof(smsg_t));
-		msg->json_msg = json_msg;
+		msg->doc = doc;
 		msg->client_id = client->id;
 		client_msg->data = msg;
 		DL_APPEND(bulk_send, client_msg);
@@ -1266,7 +1290,7 @@ static void send_node_transactions(sdata_t *sdata, const json_t *txn_val)
 	ck_runlock(&sdata->instance_lock);
 
 	if (ckpool.remote)
-		upstream_msgtype(txn_val, SM_TRANSACTIONS);
+		upstream_yydoc_msgtype(txn_doc, SM_TRANSACTIONS);
 
 	if (bulk_send) {
 		LOGINFO("Sending transactions to mining nodes");
@@ -1292,7 +1316,9 @@ static void clear_txn(txntable_t *txn)
 
 static void update_txns(sdata_t *sdata, txntable_t *txns, bool local)
 {
-	json_t *val, *txn_array = json_array(), *purged_txns = json_array();
+	yyjson_mut_doc *doc = yyjson_mut_doc_new(&ckyyalc);
+	yyjson_mut_val *txn_array = yyjson_mut_arr(doc);
+	json_t *purged_txns = json_array();
 	int added = 0, purged = 0;
 	txntable_t *tmp, *tmpa;
 
@@ -1316,13 +1342,13 @@ static void update_txns(sdata_t *sdata, txntable_t *txns, bool local)
 	}
 	/* Add the new transactions to the transaction table */
 	HASH_ITER(hh, txns, tmp, tmpa) {
+		yyjson_mut_val *txn_val;
 		txntable_t *found;
-		json_t *txn_val;
 
 		HASH_DEL(txns, tmp);
 		/* Propagate transaction here */
-		JSON_CPACK(txn_val, "{ss,ss}", "hash", tmp->hash, "data", tmp->data);
-		json_array_append_new(txn_array, txn_val);
+		txn_val = yyjson_mut_pack_val(doc, "{ss,ss}", "hash", tmp->hash, "data", tmp->data);
+		yyjson_mut_arr_append(txn_array, txn_val);
 
 		/* Check one last time this txn hasn't already been added in the
 		 * interim. This can happen in add_txn intentionally for a
@@ -1341,11 +1367,13 @@ static void update_txns(sdata_t *sdata, txntable_t *txns, bool local)
 	ck_wunlock(&sdata->txn_lock);
 
 	if (added) {
-		JSON_CPACK(val, "{so}", "transaction", txn_array);
-		send_node_transactions(sdata, val);
-		json_decref(val);
-	} else
-		json_decref(txn_array);
+		yyjson_mut_val *root = yyjson_mut_obj(doc);
+
+		yyjson_mut_obj_add_val(doc, root, "transaction", txn_array);
+		yyjson_mut_doc_set_root(doc, root);
+		send_node_transactions(sdata, doc);
+	}
+	yyjson_mut_doc_free(doc);
 
 	/* Submit transactions to bitcoind again when we're purging them in
 	 * case they've been removed from its mempool as well and we need them
@@ -1458,24 +1486,6 @@ out:
 }
 
 /* Wrapper for functions still using jansson txn arrays */
-static txntable_t *wb_merkle_bin_jtxns(sdata_t *sdata, workbase_t *wb,
-				       json_t *jtxn_array, bool local)
-{
-	txntable_t *ret;
-	yyjson_doc *doc;
-	yyjson_val *root;
-	char *s;
-
-	s = json_dumps(jtxn_array, JSON_NO_UTF8);
-
-	doc = yyjson_read(s, strlen(s), 0);
-	root = yyjson_doc_get_root(doc);
-	ret = wb_merkle_bin_txns(sdata, wb, root, local);
-	yyjson_doc_free(doc);
-	free(s);
-	return ret;
-}
-
 static const unsigned char witness_nonce[32] = {0};
 static const int witness_nonce_size = sizeof(witness_nonce);
 static const unsigned char witness_header[] = {0xaa, 0x21, 0xa9, 0xed};
@@ -1652,9 +1662,10 @@ static void downstream_json(sdata_t *sdata, const json_t *val, const int64_t cli
  * rebuild_txns by requesting their data from another server. */
 static void request_txns(sdata_t *sdata, json_t *txns)
 {
-	json_t *val;
+	json_t *val = json_object();
 
-	JSON_CPACK(val, "{so}", "hash", txns);
+	/* Still jansson as the callers create jansson hash arrays */
+	json_object_set_new_nocheck(val, "hash", txns);
 	if (ckpool.remote)
 		upstream_msgtype(val, SM_REQTXNS);
 	else if (ckpool.node) {
@@ -1673,7 +1684,9 @@ static void request_txns(sdata_t *sdata, json_t *txns)
 static bool rebuild_txns(sdata_t *sdata, workbase_t *wb)
 {
 	const char *hashes = wb->txn_hashes;
-	json_t *txn_array, *missing_txns;
+	yyjson_mut_val *txn_array;
+	yyjson_mut_doc *doc;
+	json_t *missing_txns;
 	char hash[68] = {};
 	bool ret = false;
 	txntable_t *txns;
@@ -1694,11 +1707,12 @@ static bool rebuild_txns(sdata_t *sdata, workbase_t *wb)
 		goto out;
 	}
 	ret = true;
-	txn_array = json_array();
+	doc = yyjson_mut_doc_new(&ckyyalc);
+	txn_array = yyjson_mut_arr(doc);
 	missing_txns = json_array();
 
 	for (i = 0; i < wb->txns; i++) {
-		json_t *txn_val = NULL;
+		yyjson_mut_val *txn_val = NULL;
 		txntable_t *txn;
 		char *data;
 
@@ -1709,9 +1723,9 @@ static bool rebuild_txns(sdata_t *sdata, workbase_t *wb)
 		if (likely(txn)) {
 			txn->refcount = REFCOUNT_REMOTE;
 			txn->seen = true;
-			JSON_CPACK(txn_val, "{ss,ss}",
+			txn_val = yyjson_mut_pack_val(doc, "{ss,ss}",
 				   "hash", hash, "data", txn->data);
-			json_array_append_new(txn_array, txn_val);
+			yyjson_mut_arr_append(txn_array, txn_val);
 		}
 		ck_wunlock(&sdata->txn_lock);
 
@@ -1720,8 +1734,7 @@ static bool rebuild_txns(sdata_t *sdata, workbase_t *wb)
 		/* See if we can find it in our local bitcoind */
 		data = generator_get_txn(hash);
 		if (!data) {
-			txn_val = json_string(hash);
-			json_array_append_new(missing_txns, txn_val);
+			json_array_append_new(missing_txns, json_string(hash));
 			ret = false;
 			continue;
 		}
@@ -1741,19 +1754,24 @@ static bool rebuild_txns(sdata_t *sdata, workbase_t *wb)
 		}
 		txn->refcount = REFCOUNT_REMOTE;
 		txn->seen = true;
-		JSON_CPACK(txn_val, "{ss,ss}",
+		txn_val = yyjson_mut_pack_val(doc, "{ss,ss}",
 			   "hash", hash, "data", txn->data);
-		json_array_append_new(txn_array, txn_val);
+		yyjson_mut_arr_append(txn_array, txn_val);
 		ck_wunlock(&sdata->txn_lock);
 	}
 
 	if (ret) {
+		yyjson_doc *idoc;
+
 		wb->incomplete = false;
 		LOGINFO("Rebuilt txns into workbase with %d transactions", i);
 		/* These two structures are regenerated so free their ram */
 		json_decref(wb->merkle_array);
 		dealloc(wb->txn_hashes);
-		txns = wb_merkle_bin_jtxns(sdata, wb, txn_array, false);
+		yyjson_mut_doc_set_root(doc, txn_array);
+		idoc = yyjson_mut_doc_imut_copy(doc, &ckyyalc);
+		txns = wb_merkle_bin_txns(sdata, wb, yyjson_doc_get_root(idoc), false);
+		yyjson_doc_free(idoc);
 		if (likely(txns))
 			update_txns(sdata, txns, false);
 	} else {
@@ -1766,7 +1784,7 @@ static bool rebuild_txns(sdata_t *sdata, workbase_t *wb)
 		request_txns(sdata, missing_txns);
 	}
 
-	json_decref(txn_array);
+	yyjson_mut_doc_free(doc);
 	json_decref(missing_txns);
 out:
 	return ret;
@@ -2224,6 +2242,7 @@ static void submit_node_block(sdata_t *sdata, json_t *val)
 	char blockhash[68], cdfield[64];
 	int enonce1len, cblen;
 	workbase_t *wb = NULL;
+	yyjson_mut_doc *doc;
 	json_t *bval;
 	double diff;
 	ts_t ts_now;
@@ -2298,7 +2317,7 @@ static void submit_node_block(sdata_t *sdata, json_t *val)
 	gbt_block = process_block(wb, coinbase, cblen, swap, hash, flip32, blockhash);
 	ret = local_block_submit(gbt_block, flip32, wb->height);
 
-	JSON_CPACK(bval, "{si,ss,ss,sI,ss,ss,si,ss,sI,sf,ss,ss,ss,ss}",
+	doc = yyjson_mut_pack("{si,ss,ss,sI,ss,ss,si,ss,sI,sf,ss,ss,ss,ss}",
 			 "height", wb->height,
 			 "blockhash", blockhash,
 			 "confirmed", "n",
@@ -2313,6 +2332,9 @@ static void submit_node_block(sdata_t *sdata, json_t *val)
 			 "createby", "code",
 			 "createcode", __func__,
 			 "createinet", ckpool.serverurl[0]);
+	/* block_solve/reject still consume jansson */
+	bval = yyjson_to_json(doc);
+	yyjson_mut_doc_free(doc);
 	put_workbase(sdata, wb);
 
 	if (ret)
@@ -3787,10 +3809,10 @@ static user_instance_t *user_by_workername(sdata_t *sdata, const char *workernam
 
 static worker_instance_t *get_worker(sdata_t *sdata, user_instance_t *user, const char *workername);
 
-static json_t *worker_stats(const worker_instance_t *worker)
+static yyjson_mut_doc *worker_stats(const worker_instance_t *worker)
 {
 	char suffix1[16], suffix5[16], suffix60[16], suffix1440[16], suffix10080[16];
-	json_t *val;
+	yyjson_mut_doc *doc;
 	double ghs;
 
 	ghs = worker->dsps1 * nonces;
@@ -3808,19 +3830,19 @@ static json_t *worker_stats(const worker_instance_t *worker)
 	ghs = worker->dsps10080 * nonces;
 	suffix_string(ghs, suffix10080, 16, 0);
 
-	JSON_CPACK(val, "{ss,ss,ss,ss,ss}",
+	doc = yyjson_mut_pack("{ss,ss,ss,ss,ss}",
 			"hashrate1m", suffix1,
 			"hashrate5m", suffix5,
 			"hashrate1hr", suffix60,
 			"hashrate1d", suffix1440,
 			"hashrate7d", suffix10080);
-	return val;
+	return doc;
 }
 
-static json_t *user_stats(const user_instance_t *user)
+static yyjson_mut_doc *user_stats(const user_instance_t *user)
 {
 	char suffix1[16], suffix5[16], suffix60[16], suffix1440[16], suffix10080[16];
-	json_t *val;
+	yyjson_mut_doc *doc;
 	double ghs;
 
 	ghs = user->dsps1 * nonces;
@@ -3838,7 +3860,7 @@ static json_t *user_stats(const user_instance_t *user)
 	ghs = user->dsps10080 * nonces;
 	suffix_string(ghs, suffix10080, 16, 0);
 
-	JSON_CPACK(val, "{ss,ss,ss,ss,ss,sI,sI}",
+	doc = yyjson_mut_pack("{ss,ss,ss,ss,ss,sI,sI}",
 			"hashrate1m", suffix1,
 			"hashrate5m", suffix5,
 			"hashrate1hr", suffix60,
@@ -3846,7 +3868,7 @@ static json_t *user_stats(const user_instance_t *user)
 			"hashrate7d", suffix10080,
 			"shares", user->shares,
 			"authorised", user->auth_time);
-	return val;
+	return doc;
 }
 
 /* Adjust workinfo id to virtual value for remote trusted workinfos */
@@ -3905,7 +3927,7 @@ static void block_solve(json_t *val)
 		ASPRINTF(&msg, "Block solved by %s!", ckpool.name);
 		LOGWARNING("Solved and confirmed block!");
 	} else {
-		json_t *user_val, *worker_val;
+		yyjson_mut_doc *user_val, *worker_val;
 		worker_instance_t *worker;
 		user_instance_t *user;
 		char *s;
@@ -3920,12 +3942,12 @@ static void block_solve(json_t *val)
 		worker_val = worker_stats(worker);
 		ck_runlock(&sdata->instance_lock);
 
-		s = json_dumps(user_val, JSON_NO_UTF8 | JSON_PRESERVE_ORDER);
-		json_decref(user_val);
+		s = yyjson_mut_write(user_val, 0, NULL);
+		yyjson_mut_doc_free(user_val);
 		LOGWARNING("User %s:%s", user->username, s);
 		dealloc(s);
-		s = json_dumps(worker_val, JSON_NO_UTF8 | JSON_PRESERVE_ORDER);
-		json_decref(worker_val);
+		s = yyjson_mut_write(worker_val, 0, NULL);
+		yyjson_mut_doc_free(worker_val);
 		LOGWARNING("Worker %s:%s", workername, s);
 		dealloc(s);
 	}
@@ -3959,7 +3981,7 @@ static void broadcast_ping(sdata_t *sdata)
 	stratum_broadcast(sdata, doc, SM_PING);
 }
 
-static void ckmsgq_stats(ckmsgq_t *ckmsgq, const int size, json_t **val)
+static yyjson_mut_val *ckmsgq_stats(ckmsgq_t *ckmsgq, const int size, yyjson_mut_doc *doc)
 {
 	int64_t memsize, generated;
 	ckmsg_t *msg;
@@ -3971,29 +3993,32 @@ static void ckmsgq_stats(ckmsgq_t *ckmsgq, const int size, json_t **val)
 	mutex_unlock(ckmsgq->lock);
 
 	memsize = (sizeof(ckmsg_t) + size) * objects;
-	JSON_CPACK(*val, "{si,si,sI}", "count", objects, "memory", memsize, "generated", generated);
+	return yyjson_mut_pack_val(doc, "{si,sI,sI}", "count", objects, "memory", memsize, "generated", generated);
 }
 
 char *stratifier_stats(void *data)
 {
-	json_t *val = json_object(), *subval;
+	yyjson_mut_doc *doc = yyjson_mut_doc_new(&ckyyalc);
+	yyjson_mut_val *root = yyjson_mut_obj(doc), *subval;
 	int64_t memsize, generated;
 	sdata_t *sdata = data;
 	int objects;
 	char *buf;
 
+	yyjson_mut_doc_set_root(doc, root);
+
 	ck_rlock(&sdata->workbase_lock);
 	objects = HASH_COUNT(sdata->workbases);
 	memsize = SAFE_HASH_OVERHEAD(sdata->workbases) + sizeof(workbase_t) * objects;
 	generated = sdata->workbases_generated;
-	JSON_CPACK(subval, "{si,si,sI}", "count", objects, "memory", memsize, "generated", generated);
-	json_set_object(val, "workbases", subval);
+	subval = yyjson_mut_pack_val(doc, "{si,sI,sI}", "count", objects, "memory", memsize, "generated", generated);
+	yyjson_mut_obj_add_val(doc, root, "workbases", subval);
 	objects = HASH_COUNT(sdata->remote_workbases);
 	memsize = SAFE_HASH_OVERHEAD(sdata->remote_workbases) + sizeof(workbase_t) * objects;
 	ck_runlock(&sdata->workbase_lock);
 
-	JSON_CPACK(subval, "{si,si}", "count", objects, "memory", memsize);
-	json_set_object(val, "remote_workbases", subval);
+	subval = yyjson_mut_pack_val(doc, "{si,sI}", "count", objects, "memory", memsize);
+	yyjson_mut_obj_add_val(doc, root, "remote_workbases", subval);
 
 	ck_rlock(&sdata->instance_lock);
 	if (ckpool.btcsolo) {
@@ -4008,27 +4033,27 @@ char *stratifier_stats(void *data)
 			memsize += SAFE_HASH_OVERHEAD(user->userwbs) + sizeof(struct userwb) * subobjects;
 		}
 		generated = sdata->userwbs_generated;
-		JSON_CPACK(subval, "{si,si,sI}", "count", objects, "memory", memsize, "generated", generated);
-		json_set_object(val, "userwbs", subval);
+		subval = yyjson_mut_pack_val(doc, "{si,sI,sI}", "count", objects, "memory", memsize, "generated", generated);
+		yyjson_mut_obj_add_val(doc, root, "userwbs", subval);
 	}
 
 	objects = HASH_COUNT(sdata->user_instances);
 	memsize = SAFE_HASH_OVERHEAD(sdata->user_instances) + sizeof(stratum_instance_t) * objects;
-	JSON_CPACK(subval, "{si,si}", "count", objects, "memory", memsize);
-	json_set_object(val, "users", subval);
+	subval = yyjson_mut_pack_val(doc, "{si,sI}", "count", objects, "memory", memsize);
+	yyjson_mut_obj_add_val(doc, root, "users", subval);
 
 	objects = HASH_COUNT(sdata->stratum_instances);
 	memsize = SAFE_HASH_OVERHEAD(sdata->stratum_instances);
 	generated = sdata->stratum_generated;
-	JSON_CPACK(subval, "{si,si,sI}", "count", objects, "memory", memsize, "generated", generated);
-	json_set_object(val, "clients", subval);
+	subval = yyjson_mut_pack_val(doc, "{si,sI,sI}", "count", objects, "memory", memsize, "generated", generated);
+	yyjson_mut_obj_add_val(doc, root, "clients", subval);
 
 	objects = sdata->stats.disconnected;
 	generated = sdata->disconnected_generated;
 	memsize = SAFE_HASH_OVERHEAD(sdata->disconnected_sessions);
 	memsize += sizeof(session_t) * sdata->stats.disconnected;
-	JSON_CPACK(subval, "{si,si,sI}", "count", objects, "memory", memsize, "generated", generated);
-	json_set_object(val, "disconnected", subval);
+	subval = yyjson_mut_pack_val(doc, "{si,sI,sI}", "count", objects, "memory", memsize, "generated", generated);
+	yyjson_mut_obj_add_val(doc, root, "disconnected", subval);
 	ck_runlock(&sdata->instance_lock);
 
 	mutex_lock(&sdata->share_lock);
@@ -4037,27 +4062,27 @@ char *stratifier_stats(void *data)
 	memsize = SAFE_HASH_OVERHEAD(sdata->shares) + sizeof(share_t) * objects;
 	mutex_unlock(&sdata->share_lock);
 
-	JSON_CPACK(subval, "{si,si,sI}", "count", objects, "memory", memsize, "generated", generated);
-	json_set_object(val, "shares", subval);
+	subval = yyjson_mut_pack_val(doc, "{si,sI,sI}", "count", objects, "memory", memsize, "generated", generated);
+	yyjson_mut_obj_add_val(doc, root, "shares", subval);
 
 	ck_rlock(&sdata->txn_lock);
 	objects = HASH_COUNT(sdata->txns);
 	memsize = SAFE_HASH_OVERHEAD(sdata->txns) + sizeof(txntable_t) * objects;
 	generated = sdata->txns_generated;
-	JSON_CPACK(subval, "{si,si,sI}", "count", objects, "memory", memsize, "generated", generated);
-	json_set_object(val, "transactions", subval);
+	subval = yyjson_mut_pack_val(doc, "{si,sI,sI}", "count", objects, "memory", memsize, "generated", generated);
+	yyjson_mut_obj_add_val(doc, root, "transactions", subval);
 	ck_runlock(&sdata->txn_lock);
 
-	ckmsgq_stats(sdata->ssends, sizeof(smsg_t), &subval);
-	json_set_object(val, "ssends", subval);
+	subval = ckmsgq_stats(sdata->ssends, sizeof(smsg_t), doc);
+	yyjson_mut_obj_add_val(doc, root, "ssends", subval);
 	/* Don't know exactly how big the string is so just count the pointer for now */
-	ckmsgq_stats(sdata->srecvs, sizeof(char *), &subval);
-	json_set_object(val, "srecvs", subval);
-	ckmsgq_stats(sdata->stxnq, sizeof(json_params_t), &subval);
-	json_set_object(val, "stxnq", subval);
+	subval = ckmsgq_stats(sdata->srecvs, sizeof(char *), doc);
+	yyjson_mut_obj_add_val(doc, root, "srecvs", subval);
+	subval = ckmsgq_stats(sdata->stxnq, sizeof(json_params_t), doc);
+	yyjson_mut_obj_add_val(doc, root, "stxnq", subval);
 
-	buf = json_dumps(val, JSON_NO_UTF8 | JSON_PRESERVE_ORDER);
-	json_decref(val);
+	buf = yyjson_mut_write(doc, 0, NULL);
+	yyjson_mut_doc_free(doc);
 	LOGNOTICE("Stratifier stats: %s", buf);
 	return buf;
 }
@@ -4114,366 +4139,401 @@ static void reconnect_client_id(sdata_t *sdata, const int64_t client_id)
 
 /* API commands */
 
-static json_t *userinfo(const user_instance_t *user)
+static yyjson_mut_val *userinfo(yyjson_mut_doc *doc, const user_instance_t *user)
 {
-	json_t *val;
-
-	JSON_CPACK(val, "{ss,si,si,sf,sf,sf,sf,sf,sf,si}",
+	return yyjson_mut_pack_val(doc, "{ss,si,si,sf,sf,sf,sf,sf,sf,sI}",
 		   "user", user->username, "id", user->id, "workers", user->workers,
 	    "bestdiff", user->best_diff, "dsps1", user->dsps1, "dsps5", user->dsps5,
 	    "dsps60", user->dsps60, "dsps1440", user->dsps1440, "dsps10080", user->dsps10080,
 	    "lastshare", user->last_share.tv_sec);
-	return val;
 }
 
 static void getuser(sdata_t *sdata, const char *buf, int *sockd)
 {
-	json_t *val = NULL, *res = NULL;
+	yyjson_mut_doc *res = NULL;
 	char *username = NULL;
 	user_instance_t *user;
+	json_t *val = NULL;
 	json_error_t err_val;
 
 	val = json_loads(buf, 0, &err_val);
 	if (unlikely(!val)) {
-		res = json_encode_errormsg(&err_val);
+		res = yyjson_encode_errormsg(&err_val);
 		goto out;
 	}
 	if (!json_get_string(&username, val, "user")) {
-		res = json_errormsg("Failed to find user key");
+		res = yyjson_errormsg("Failed to find user key");
 		goto out;
 	}
 	if (!strlen(username)) {
-		res = json_errormsg("Zero length user key");
+		res = yyjson_errormsg("Zero length user key");
 		goto out;
 	}
 	user = get_user(sdata, username);
-	res = userinfo(user);
+	res = yyjson_mut_doc_new(&ckyyalc);
+	yyjson_mut_doc_set_root(res, userinfo(res, user));
 out:
 	if (val)
 		json_decref(val);
 	free(username);
-	send_api_response(res, *sockd);
+	send_api_yyresponse(res, *sockd);
 }
 
 static void userclients(sdata_t *sdata, const char *buf, int *sockd)
 {
-	json_t *val = NULL, *res = NULL, *client_arr;
+	yyjson_mut_doc *doc = yyjson_mut_doc_new(&ckyyalc), *res = NULL;
+	yyjson_mut_val *root, *client_arr;
 	stratum_instance_t *client;
 	char *username = NULL;
 	user_instance_t *user;
+	json_t *val = NULL;
 	json_error_t err_val;
 
 	val = json_loads(buf, 0, &err_val);
 	if (unlikely(!val)) {
-		res = json_encode_errormsg(&err_val);
+		res = yyjson_encode_errormsg(&err_val);
 		goto out;
 	}
 	if (!json_get_string(&username, val, "user")) {
-		res = json_errormsg("Failed to find user key");
+		res = yyjson_errormsg("Failed to find user key");
 		goto out;
 	}
 	if (!strlen(username)) {
-		res = json_errormsg("Zero length user key");
+		res = yyjson_errormsg("Zero length user key");
 		goto out;
 	}
 	user = get_user(sdata, username);
-	client_arr = json_array();
+	client_arr = yyjson_mut_arr(doc);
 
 	ck_rlock(&sdata->instance_lock);
 	DL_FOREACH2(user->clients, client, user_next) {
-		json_array_append_new(client_arr, json_integer(client->id));
+		yyjson_mut_arr_add_int(doc, client_arr, client->id);
 	}
 	ck_runlock(&sdata->instance_lock);
 
-	JSON_CPACK(res, "{ss,so}", "user", username, "clients", client_arr);
+	root = yyjson_mut_pack_val(doc, "{ss,so}", "user", username, "clients", client_arr);
+	yyjson_mut_doc_set_root(doc, root);
+	res = doc;
+	doc = NULL;
 out:
+	if (doc)
+		yyjson_mut_doc_free(doc);
 	if (val)
 		json_decref(val);
 	free(username);
-	send_api_response(res, *sockd);
+	send_api_yyresponse(res, *sockd);
 }
 
 static void workerclients(sdata_t *sdata, const char *buf, int *sockd)
 {
-	json_t *val = NULL, *res = NULL, *client_arr;
+	yyjson_mut_doc *doc = yyjson_mut_doc_new(&ckyyalc), *res = NULL;
 	char *tmp, *username, *workername = NULL;
+	yyjson_mut_val *root, *client_arr;
 	stratum_instance_t *client;
 	user_instance_t *user;
+	json_t *val = NULL;
 	json_error_t err_val;
 
 	val = json_loads(buf, 0, &err_val);
 	if (unlikely(!val)) {
-		res = json_encode_errormsg(&err_val);
+		res = yyjson_encode_errormsg(&err_val);
 		goto out;
 	}
 	if (!json_get_string(&workername, val, "worker")) {
-		res = json_errormsg("Failed to find worker key");
+		res = yyjson_errormsg("Failed to find worker key");
 		goto out;
 	}
 	if (!strlen(workername)) {
-		res = json_errormsg("Zero length worker key");
+		res = yyjson_errormsg("Zero length worker key");
 		goto out;
 	}
 	tmp = strdupa(workername);
 	username = strsep(&tmp, "._");
 	user = get_user(sdata, username);
-	client_arr = json_array();
+	client_arr = yyjson_mut_arr(doc);
 
 	ck_rlock(&sdata->instance_lock);
 	DL_FOREACH2(user->clients, client, user_next) {
 		if (strcmp(client->workername, workername))
 			continue;
-		json_array_append_new(client_arr, json_integer(client->id));
+		yyjson_mut_arr_add_int(doc, client_arr, client->id);
 	}
 	ck_runlock(&sdata->instance_lock);
 
-	JSON_CPACK(res, "{ss,so}", "worker", workername, "clients", client_arr);
+	root = yyjson_mut_pack_val(doc, "{ss,so}", "worker", workername, "clients", client_arr);
+	yyjson_mut_doc_set_root(doc, root);
+	res = doc;
+	doc = NULL;
 out:
+	if (doc)
+		yyjson_mut_doc_free(doc);
 	if (val)
 		json_decref(val);
 	free(workername);
-	send_api_response(res, *sockd);
+	send_api_yyresponse(res, *sockd);
 }
 
-static json_t *workerinfo(const user_instance_t *user, const worker_instance_t *worker)
+static yyjson_mut_val *workerinfo(yyjson_mut_doc *doc, const user_instance_t *user,
+				  const worker_instance_t *worker)
 {
-	json_t *val;
-
-	JSON_CPACK(val, "{ss,ss,si,sf,sf,sf,sf,si,sf,si,sb}",
+	return yyjson_mut_pack_val(doc, "{ss,ss,si,sf,sf,sf,sf,sI,sf,si,sb}",
 		   "user", user->username, "worker", worker->workername, "id", user->id,
 	    "dsps1", worker->dsps1, "dsps5", worker->dsps5, "dsps60", worker->dsps60,
 	    "dsps1440", worker->dsps1440, "lastshare", worker->last_share.tv_sec,
 	    "bestdiff", worker->best_diff, "mindiff", worker->mindiff, "idle", worker->idle);
-	return val;
 }
 
 static void getworker(sdata_t *sdata, const char *buf, int *sockd)
 {
 	char *tmp, *username, *workername = NULL;
-	json_t *val = NULL, *res = NULL;
+	yyjson_mut_doc *res = NULL;
 	worker_instance_t *worker;
 	user_instance_t *user;
+	json_t *val = NULL;
 	json_error_t err_val;
 
 	val = json_loads(buf, 0, &err_val);
 	if (unlikely(!val)) {
-		res = json_encode_errormsg(&err_val);
+		res = yyjson_encode_errormsg(&err_val);
 		goto out;
 	}
 	if (!json_get_string(&workername, val, "worker")) {
-		res = json_errormsg("Failed to find worker key");
+		res = yyjson_errormsg("Failed to find worker key");
 		goto out;
 	}
 	if (!strlen(workername)) {
-		res = json_errormsg("Zero length worker key");
+		res = yyjson_errormsg("Zero length worker key");
 		goto out;
 	}
 	tmp = strdupa(workername);
 	username = strsep(&tmp, "._");
 	user = get_user(sdata, username);
 	worker = get_worker(sdata, user, workername);
-	res = workerinfo(user, worker);
+	res = yyjson_mut_doc_new(&ckyyalc);
+	yyjson_mut_doc_set_root(res, workerinfo(res, user, worker));
 out:
 	if (val)
 		json_decref(val);
 	free(workername);
-	send_api_response(res, *sockd);
+	send_api_yyresponse(res, *sockd);
 }
 
 static void getworkers(sdata_t *sdata, int *sockd)
 {
-	json_t *val = NULL, *worker_arr;
+	yyjson_mut_doc *doc = yyjson_mut_doc_new(&ckyyalc);
+	yyjson_mut_val *root, *worker_arr;
 	worker_instance_t *worker;
 	user_instance_t *user;
 
-	worker_arr = json_array();
+	worker_arr = yyjson_mut_arr(doc);
 
 	ck_rlock(&sdata->instance_lock);
 	for (user = sdata->user_instances; user; user = user->hh.next) {
 		DL_FOREACH(user->worker_instances, worker) {
-			json_array_append_new(worker_arr, workerinfo(user, worker));
+			yyjson_mut_arr_append(worker_arr, workerinfo(doc, user, worker));
 		}
 	}
 	ck_runlock(&sdata->instance_lock);
 
-	JSON_CPACK(val, "{so}", "workers", worker_arr);
-	send_api_response(val, *sockd);
+	root = yyjson_mut_pack_val(doc, "{so}", "workers", worker_arr);
+	yyjson_mut_doc_set_root(doc, root);
+	send_api_yyresponse(doc, *sockd);
 }
 
 static void getusers(sdata_t *sdata, int *sockd)
 {
-	json_t *val = NULL, *user_array;
+	yyjson_mut_doc *doc = yyjson_mut_doc_new(&ckyyalc);
+	yyjson_mut_val *root, *user_array;
 	user_instance_t *user;
 
-	user_array = json_array();
+	user_array = yyjson_mut_arr(doc);
 
 	ck_rlock(&sdata->instance_lock);
 	for (user = sdata->user_instances; user; user = user->hh.next) {
-		json_array_append_new(user_array, userinfo(user));
+		yyjson_mut_arr_append(user_array, userinfo(doc, user));
 	}
 	ck_runlock(&sdata->instance_lock);
 
-	JSON_CPACK(val, "{so}", "users", user_array);
-	send_api_response(val, *sockd);
+	root = yyjson_mut_pack_val(doc, "{so}", "users", user_array);
+	yyjson_mut_doc_set_root(doc, root);
+	send_api_yyresponse(doc, *sockd);
 }
 
-static json_t *clientinfo(const stratum_instance_t *client)
+static yyjson_mut_val *clientinfo(yyjson_mut_doc *doc, const stratum_instance_t *client)
 {
-	json_t *val = json_object();
+	yyjson_mut_val *val = yyjson_mut_obj(doc);
 
 	/* Too many fields for a pack object, do each discretely to keep track */
-	json_set_int(val, "id", client->id);
-	json_set_string(val, "enonce1", client->enonce1);
-	json_set_string(val, "enonce1var", client->enonce1var);
-	json_set_int(val, "enonce1_64", client->enonce1_64);
-	json_set_double(val, "diff", client->diff);
-	json_set_double(val, "dsps1", client->dsps1);
-	json_set_double(val, "dsps5", client->dsps5);
-	json_set_double(val, "dsps60", client->dsps60);
-	json_set_double(val, "dsps1440", client->dsps1440);
-	json_set_double(val, "dsps10080", client->dsps10080);
-	json_set_int(val, "lastshare", client->last_share.tv_sec);
-	json_set_int(val, "starttime", client->start_time);
-	json_set_string(val, "address", client->address);
-	json_set_bool(val, "subscribed", client->subscribed);
-	json_set_bool(val, "authorised", client->authorised);
-	json_set_bool(val, "idle", client->idle);
-	json_set_string(val, "useragent", client->useragent ? client->useragent : "");
-	json_set_string(val, "workername", client->workername ? client->workername : "");
-	json_set_int(val, "userid", client->user_id);
-	json_set_int(val, "server", client->server);
-	json_set_double(val, "bestdiff", client->best_diff);
-	json_set_int(val, "proxyid", client->proxyid);
-	json_set_int(val, "subproxyid", client->subproxyid);
+	yyjson_mut_obj_add_int(doc, val, "id", client->id);
+	yyjson_mut_obj_add_strcpy(doc, val, "enonce1", client->enonce1);
+	yyjson_mut_obj_add_strcpy(doc, val, "enonce1var", client->enonce1var);
+	yyjson_mut_obj_add_int(doc, val, "enonce1_64", client->enonce1_64);
+	yyjson_mut_obj_add_real(doc, val, "diff", client->diff);
+	yyjson_mut_obj_add_real(doc, val, "dsps1", client->dsps1);
+	yyjson_mut_obj_add_real(doc, val, "dsps5", client->dsps5);
+	yyjson_mut_obj_add_real(doc, val, "dsps60", client->dsps60);
+	yyjson_mut_obj_add_real(doc, val, "dsps1440", client->dsps1440);
+	yyjson_mut_obj_add_real(doc, val, "dsps10080", client->dsps10080);
+	yyjson_mut_obj_add_int(doc, val, "lastshare", client->last_share.tv_sec);
+	yyjson_mut_obj_add_int(doc, val, "starttime", client->start_time);
+	yyjson_mut_obj_add_strcpy(doc, val, "address", client->address);
+	yyjson_mut_obj_add_bool(doc, val, "subscribed", client->subscribed);
+	yyjson_mut_obj_add_bool(doc, val, "authorised", client->authorised);
+	yyjson_mut_obj_add_bool(doc, val, "idle", client->idle);
+	yyjson_mut_obj_add_strcpy(doc, val, "useragent", client->useragent ? client->useragent : "");
+	yyjson_mut_obj_add_strcpy(doc, val, "workername", client->workername ? client->workername : "");
+	yyjson_mut_obj_add_int(doc, val, "userid", client->user_id);
+	yyjson_mut_obj_add_int(doc, val, "server", client->server);
+	yyjson_mut_obj_add_real(doc, val, "bestdiff", client->best_diff);
+	yyjson_mut_obj_add_int(doc, val, "proxyid", client->proxyid);
+	yyjson_mut_obj_add_int(doc, val, "subproxyid", client->subproxyid);
 
 	return val;
 }
 
 static void getclient(sdata_t *sdata, const char *buf, int *sockd)
 {
-	json_t *val = NULL, *res = NULL;
+	yyjson_mut_doc *res = NULL;
 	stratum_instance_t *client;
+	json_t *val = NULL;
 	json_error_t err_val;
 	int64_t client_id;
 
 	val = json_loads(buf, 0, &err_val);
 	if (unlikely(!val)) {
-		res = json_encode_errormsg(&err_val);
+		res = yyjson_encode_errormsg(&err_val);
 		goto out;
 	}
 	if (!json_get_int64(&client_id, val, "id")) {
-		res = json_errormsg("Failed to find id key");
+		res = yyjson_errormsg("Failed to find id key");
 		goto out;
 	}
 	client = ref_instance_by_id(sdata, client_id);
 	if (!client) {
-		res = json_errormsg("Failed to find client %"PRId64, client_id);
+		res = yyjson_errormsg("Failed to find client %"PRId64, client_id);
 		goto out;
 	}
-	res = clientinfo(client);
+	res = yyjson_mut_doc_new(&ckyyalc);
+	yyjson_mut_doc_set_root(res, clientinfo(res, client));
 
 	dec_instance_ref(sdata, client);
 out:
 	if (val)
 		json_decref(val);
-	send_api_response(res, *sockd);
+	send_api_yyresponse(res, *sockd);
 }
 
 static void getclients(sdata_t *sdata, int *sockd)
 {
-	json_t *val = NULL, *client_arr;
+	yyjson_mut_doc *doc = yyjson_mut_doc_new(&ckyyalc);
+	yyjson_mut_val *root, *client_arr;
 	stratum_instance_t *client;
 
-	client_arr = json_array();
+	client_arr = yyjson_mut_arr(doc);
 
 	ck_rlock(&sdata->instance_lock);
 	for (client = sdata->stratum_instances; client; client = client->hh.next) {
-		json_array_append_new(client_arr, clientinfo(client));
+		yyjson_mut_arr_append(client_arr, clientinfo(doc, client));
 	}
 	ck_runlock(&sdata->instance_lock);
 
-	JSON_CPACK(val, "{so}", "clients", client_arr);
-	send_api_response(val, *sockd);
+	root = yyjson_mut_pack_val(doc, "{so}", "clients", client_arr);
+	yyjson_mut_doc_set_root(doc, root);
+	send_api_yyresponse(doc, *sockd);
 }
 
 static void user_clientinfo(sdata_t *sdata, const char *buf, int *sockd)
 {
-	json_t *val = NULL, *res = NULL, *client_arr;
+	yyjson_mut_doc *doc = yyjson_mut_doc_new(&ckyyalc), *res = NULL;
+	yyjson_mut_val *root, *client_arr;
 	stratum_instance_t *client;
 	char *username = NULL;
 	user_instance_t *user;
+	json_t *val = NULL;
 	json_error_t err_val;
 
 	val = json_loads(buf, 0, &err_val);
 	if (unlikely(!val)) {
-		res = json_encode_errormsg(&err_val);
+		res = yyjson_encode_errormsg(&err_val);
 		goto out;
 	}
 	if (!json_get_string(&username, val, "user")) {
-		res = json_errormsg("Failed to find user key");
+		res = yyjson_errormsg("Failed to find user key");
 		goto out;
 	}
 	if (!strlen(username)) {
-		res = json_errormsg("Zero length user key");
+		res = yyjson_errormsg("Zero length user key");
 		goto out;
 	}
 	user = get_user(sdata, username);
-	client_arr = json_array();
+	client_arr = yyjson_mut_arr(doc);
 
 	ck_rlock(&sdata->instance_lock);
 	DL_FOREACH2(user->clients, client, user_next) {
-		json_array_append_new(client_arr, clientinfo(client));
+		yyjson_mut_arr_append(client_arr, clientinfo(doc, client));
 	}
 	ck_runlock(&sdata->instance_lock);
 
-	JSON_CPACK(res, "{ss,so}", "user", username, "clients", client_arr);
+	root = yyjson_mut_pack_val(doc, "{ss,so}", "user", username, "clients", client_arr);
+	yyjson_mut_doc_set_root(doc, root);
+	res = doc;
+	doc = NULL;
 out:
+	if (doc)
+		yyjson_mut_doc_free(doc);
 	if (val)
 		json_decref(val);
 	free(username);
-	send_api_response(res, *sockd);
+	send_api_yyresponse(res, *sockd);
 }
 
 static void worker_clientinfo(sdata_t *sdata, const char *buf, int *sockd)
 {
-	json_t *val = NULL, *res = NULL, *client_arr;
+	yyjson_mut_doc *doc = yyjson_mut_doc_new(&ckyyalc), *res = NULL;
 	char *tmp, *username, *workername = NULL;
+	yyjson_mut_val *root, *client_arr;
 	stratum_instance_t *client;
 	user_instance_t *user;
+	json_t *val = NULL;
 	json_error_t err_val;
 
 	val = json_loads(buf, 0, &err_val);
 	if (unlikely(!val)) {
-		res = json_encode_errormsg(&err_val);
+		res = yyjson_encode_errormsg(&err_val);
 		goto out;
 	}
 	if (!json_get_string(&workername, val, "worker")) {
-		res = json_errormsg("Failed to find worker key");
+		res = yyjson_errormsg("Failed to find worker key");
 		goto out;
 	}
 	if (!strlen(workername)) {
-		res = json_errormsg("Zero length worker key");
+		res = yyjson_errormsg("Zero length worker key");
 		goto out;
 	}
 	tmp = strdupa(workername);
 	username = strsep(&tmp, "._");
 	user = get_user(sdata, username);
-	client_arr = json_array();
+	client_arr = yyjson_mut_arr(doc);
 
 	ck_rlock(&sdata->instance_lock);
 	DL_FOREACH2(user->clients, client, user_next) {
 		if (strcmp(client->workername, workername))
 			continue;
-		json_array_append_new(client_arr, clientinfo(client));
+		yyjson_mut_arr_append(client_arr, clientinfo(doc, client));
 	}
 	ck_runlock(&sdata->instance_lock);
 
-	JSON_CPACK(res, "{ss,so}", "worker", workername, "clients", client_arr);
+	root = yyjson_mut_pack_val(doc, "{ss,so}", "worker", workername, "clients", client_arr);
+	yyjson_mut_doc_set_root(doc, root);
+	res = doc;
+	doc = NULL;
 out:
+	if (doc)
+		yyjson_mut_doc_free(doc);
 	if (val)
 		json_decref(val);
 	free(workername);
-	send_api_response(res, *sockd);
+	send_api_yyresponse(res, *sockd);
 }
 
 /* Return the user masked priority value of the proxy */
@@ -4484,12 +4544,11 @@ static int proxy_prio(const proxy_t *proxy)
 	return prio;
 }
 
-static json_t *json_proxyinfo(const proxy_t *proxy)
+static yyjson_mut_val *yyjson_proxyinfo(yyjson_mut_doc *doc, const proxy_t *proxy)
 {
 	const proxy_t *parent = proxy->parent;
-	json_t *val;
 
-	JSON_CPACK(val, "{si,si,si,sf,ss,ss,ss,ss,ss,si,si,si,si,sb,sb,sI,sI,sI,sI,sI,si,sb,sb,si}",
+	return yyjson_mut_pack_val(doc, "{si,si,si,sf,ss,ss,ss,ss,ss,si,si,si,si,sb,sb,sI,sI,sI,sI,sI,si,sb,sb,si}",
 	    "id", proxy->id, "subid", proxy->subid, "priority", proxy_prio(parent),
 	    "diff", proxy->diff, "baseurl", proxy->baseurl, "url", proxy->url,
 	    "auth", proxy->auth, "pass", proxy->pass,
@@ -4500,23 +4559,23 @@ static json_t *json_proxyinfo(const proxy_t *proxy)
 	    "bound_clients", proxy->bound_clients, "combined_clients", parent->combined_clients,
 	    "headroom", proxy->headroom, "subproxy_count", parent->subproxy_count,
 	    "dead", proxy->dead, "global", proxy->global, "userid", proxy->userid);
-	return val;
 }
 
 static void getproxy(sdata_t *sdata, const char *buf, int *sockd)
 {
-	json_t *val = NULL, *res = NULL;
+	yyjson_mut_doc *res = NULL;
+	json_t *val = NULL;
 	json_error_t err_val;
 	int id, subid = 0;
 	proxy_t *proxy;
 
 	val = json_loads(buf, 0, &err_val);
 	if (unlikely(!val)) {
-		res = json_encode_errormsg(&err_val);
+		res = yyjson_encode_errormsg(&err_val);
 		goto out;
 	}
 	if (!json_get_int(&id, val, "id")) {
-		res = json_errormsg("Failed to find id key");
+		res = yyjson_errormsg("Failed to find id key");
 		goto out;
 	}
 	json_get_int(&subid, val, "subid");
@@ -4525,20 +4584,23 @@ static void getproxy(sdata_t *sdata, const char *buf, int *sockd)
 	else
 		proxy = existing_subproxy(sdata, id, subid);
 	if (!proxy) {
-		res = json_errormsg("Failed to find proxy %d:%d", id, subid);
+		res = yyjson_errormsg("Failed to find proxy %d:%d", id, subid);
 		goto out;
 	}
-	res = json_proxyinfo(proxy);
+	res = yyjson_mut_doc_new(&ckyyalc);
+	yyjson_mut_doc_set_root(res, yyjson_proxyinfo(res, proxy));
 out:
 	if (val)
 		json_decref(val);
-	send_api_response(res, *sockd);
+	send_api_yyresponse(res, *sockd);
 }
 
 static void proxyinfo(sdata_t *sdata, const char *buf, int *sockd)
 {
-	json_t *val = NULL, *res = NULL, *arr_val = json_array();
+	yyjson_mut_doc *doc = yyjson_mut_doc_new(&ckyyalc);
+	yyjson_mut_val *root, *arr_val = yyjson_mut_arr(doc);
 	proxy_t *proxy, *subproxy;
+	json_t *val = NULL;
 	bool all = true;
 	int userid = 0;
 
@@ -4554,57 +4616,60 @@ static void proxyinfo(sdata_t *sdata, const char *buf, int *sockd)
 		if (!all && proxy->userid != userid)
 			continue;
 		for (subproxy = proxy->subproxies; subproxy; subproxy = subproxy->sh.next)
-			json_array_append_new(arr_val, json_proxyinfo(subproxy));
+			yyjson_mut_arr_append(arr_val, yyjson_proxyinfo(doc, subproxy));
 	}
 	mutex_unlock(&sdata->proxy_lock);
 
 	if (val)
 		json_decref(val);
-	JSON_CPACK(res, "{so}", "proxies", arr_val);
-	send_api_response(res, *sockd);
+	root = yyjson_mut_pack_val(doc, "{so}", "proxies", arr_val);
+	yyjson_mut_doc_set_root(doc, root);
+	send_api_yyresponse(doc, *sockd);
 }
 
 static void setproxy(sdata_t *sdata, const char *buf, int *sockd)
 {
-	json_t *val = NULL, *res = NULL;
+	yyjson_mut_doc *res = NULL;
+	json_t *val = NULL;
 	json_error_t err_val;
 	int id, priority;
 	proxy_t *proxy;
 
 	val = json_loads(buf, 0, &err_val);
 	if (unlikely(!val)) {
-		res = json_encode_errormsg(&err_val);
+		res = yyjson_encode_errormsg(&err_val);
 		goto out;
 	}
 	if (!json_get_int(&id, val, "id")) {
-		res = json_errormsg("Failed to find id key");
+		res = yyjson_errormsg("Failed to find id key");
 		goto out;
 	}
 	if (!json_get_int(&priority, val, "priority")) {
-		res = json_errormsg("Failed to find priority key");
+		res = yyjson_errormsg("Failed to find priority key");
 		goto out;
 	}
 	proxy = existing_proxy(sdata, id);
 	if (!proxy) {
-		res = json_errormsg("Failed to find proxy %d", id);
+		res = yyjson_errormsg("Failed to find proxy %d", id);
 		goto out;
 	}
 	if (priority != proxy_prio(proxy))
 		set_proxy_prio(sdata, proxy, priority);
-	res = json_proxyinfo(proxy);
+	res = yyjson_mut_doc_new(&ckyyalc);
+	yyjson_mut_doc_set_root(res, yyjson_proxyinfo(res, proxy));
 out:
 	if (val)
 		json_decref(val);
-	send_api_response(res, *sockd);
+	send_api_yyresponse(res, *sockd);
 }
 
 static void get_poolstats(sdata_t *sdata, int *sockd)
 {
 	pool_stats_t *stats = &sdata->stats;
-	json_t *val;
+	yyjson_mut_doc *doc;
 
 	mutex_lock(&sdata->stats_lock);
-	JSON_CPACK(val, "{si,si,si,si,si,sI,sf,sf,sf,sf,sI,sI,sf,sf,sf,sf,sf,sf,sf}",
+	doc = yyjson_mut_pack("{sI,sI,si,si,si,sI,sf,sf,sf,sf,sI,sI,sf,sf,sf,sf,sf,sf,sf}",
 		   "start", stats->start_time.tv_sec, "update", stats->last_update.tv_sec,
 	    "workers", stats->workers + stats->remote_workers, "users", stats->users + stats->remote_users,
 	    "disconnected", stats->disconnected,
@@ -4615,16 +4680,16 @@ static void get_poolstats(sdata_t *sdata, int *sockd)
 	    "dsps1440", stats->dsps1440, "dsps10080", stats->dsps10080);
 	mutex_unlock(&sdata->stats_lock);
 
-	send_api_response(val, *sockd);
+	send_api_yyresponse(doc, *sockd);
 }
 
 static void get_uptime(sdata_t *sdata, int *sockd)
 {
 	int uptime = time(NULL) - sdata->stats.start_time.tv_sec;
-	json_t *val;
+	yyjson_mut_doc *doc;
 
-	JSON_CPACK(val, "{si}", "uptime", uptime);
-	send_api_response(val, *sockd);
+	doc = yyjson_mut_pack("{si}", "uptime", uptime);
+	send_api_yyresponse(doc, *sockd);
 }
 
 static void stratum_loop(proc_instance_t *pi)
@@ -6075,14 +6140,14 @@ static void update_client(const stratum_instance_t *client, const int64_t client
 static void submit_share(stratum_instance_t *client, const int64_t jobid, const char *nonce2,
 			 const char *ntime, const char *nonce)
 {
-	json_t *json_msg;
+	yyjson_mut_doc *doc;
 	char enonce2[32];
 
 	sprintf(enonce2, "%s%s", client->enonce1var, nonce2);
-	JSON_CPACK(json_msg, "{sIsssssssIsIsi}", "jobid", jobid, "nonce2", enonce2,
-			     "ntime", ntime, "nonce", nonce, "client_id", client->id,
-			     "proxy", client->proxyid, "subproxy", client->subproxyid);
-	generator_add_send(json_msg);
+	doc = yyjson_mut_pack("{sIsssssssIsisi}", "jobid", jobid, "nonce2", enonce2,
+			      "ntime", ntime, "nonce", nonce, "client_id", client->id,
+			      "proxy", client->proxyid, "subproxy", client->subproxyid);
+	generator_add_send(doc);
 }
 
 static void check_best_diff(sdata_t *sdata, user_instance_t *user,worker_instance_t *worker,
@@ -6583,12 +6648,11 @@ static json_params_t
 	jp->client_id = client_id;
 
 	/* Braindead conversion to yyjson for now */
-	json_t *val;
+	json_t *val = json_object();
 	yyjson_mut_val *root;
-	JSON_CPACK(val, "{sososo}",
-		"method", jp->method,
-		"params", jp->params,
-		"id", jp->id_val);
+	json_object_set_nocheck(val, "method", jp->method);
+	json_object_set_nocheck(val, "params", jp->params);
+	json_object_set_nocheck(val, "id", jp->id_val);
 	jp->doc = json_to_yyjson(val);
 	json_decref(val);
 	root = yyjson_mut_doc_get_root(jp->doc);
@@ -6661,28 +6725,29 @@ static void init_client(const stratum_instance_t *client, const int64_t client_i
  * current ones to it. */
 static void send_node_all_txns(sdata_t *sdata, const stratum_instance_t *client)
 {
-	json_t *txn_array, *val, *txn_val;
+	yyjson_mut_doc *doc = yyjson_mut_doc_new(&ckyyalc);
+	yyjson_mut_val *root = yyjson_mut_obj(doc), *txn_array, *txn_val;
 	txntable_t *txn, *tmp;
 	smsg_t *msg;
 
-	txn_array = json_array();
+	yyjson_mut_doc_set_root(doc, root);
+	txn_array = yyjson_mut_arr(doc);
+
+	if (client->trusted)
+		yyjson_mut_obj_add_strcpy(doc, root, "method", stratum_msgs[SM_TRANSACTIONS]);
+	else
+		yyjson_mut_obj_add_strcpy(doc, root, "node.method", stratum_msgs[SM_TRANSACTIONS]);
 
 	ck_rlock(&sdata->txn_lock);
 	HASH_ITER(hh, sdata->txns, txn, tmp) {
-		JSON_CPACK(txn_val, "{ss,ss}", "hash", txn->hash, "data", txn->data);
-		json_array_append_new(txn_array, txn_val);
+		txn_val = yyjson_mut_pack_val(doc, "{ss,ss}", "hash", txn->hash, "data", txn->data);
+		yyjson_mut_arr_append(txn_array, txn_val);
 	}
 	ck_runlock(&sdata->txn_lock);
 
-	if (client->trusted) {
-		JSON_CPACK(val, "{ss,so}", "method", stratum_msgs[SM_TRANSACTIONS],
-			   "transaction", txn_array);
-	} else {
-		JSON_CPACK(val, "{ss,so}", "node.method", stratum_msgs[SM_TRANSACTIONS],
-			   "transaction", txn_array);
-	}
+	yyjson_mut_obj_add_val(doc, root, "transaction", txn_array);
 	msg = ckzalloc(sizeof(smsg_t));
-	msg->json_msg = val;
+	msg->doc = doc;
 	msg->client_id = client->id;
 	ckmsgq_add(sdata->ssends, msg);
 	LOGNOTICE("Sending new node client %s all transactions", client->identity);
@@ -7417,35 +7482,35 @@ void parse_remote_txns(const json_t *val)
 	add_node_txns(ckpool.sdata, val);
 }
 
-static json_t *get_hash_transactions(sdata_t *sdata, const json_t *hashes)
+static yyjson_mut_val *get_hash_transactions(sdata_t *sdata, yyjson_mut_doc *doc,
+					     const json_t *hashes)
 {
-	json_t *txn_array = json_array(), *arr_val;
-	int found = 0;
+	yyjson_mut_val *txn_array = yyjson_mut_arr(doc), *arr_val;
+	json_t *jarr_val;
 	size_t index;
 
 	ck_rlock(&sdata->txn_lock);
-	json_array_foreach(hashes, index, arr_val) {
-		const char *hash = json_string_value(arr_val);
-		json_t *txn_val;
+	json_array_foreach(hashes, index, jarr_val) {
+		const char *hash = json_string_value(jarr_val);
 		txntable_t *txn;
 
 		HASH_FIND_STR(sdata->txns, hash, txn);
 		if (!txn)
 			continue;
-		JSON_CPACK(txn_val, "{ss,ss}",
+		arr_val = yyjson_mut_pack_val(doc, "{ss,ss}",
 			   "hash", hash, "data", txn->data);
-		json_array_append_new(txn_array, txn_val);
-		found++;
+		yyjson_mut_arr_append(txn_array, arr_val);
 	}
 	ck_runlock(&sdata->txn_lock);
 
 	return txn_array;
 }
 
-static json_t *get_reqtxns(sdata_t *sdata, const json_t *val, bool downstream)
+static yyjson_mut_doc *get_reqtxns(sdata_t *sdata, const json_t *val, bool downstream)
 {
 	json_t *hashes = json_object_get(val, "hash");
-	json_t *txns, *ret = NULL;
+	yyjson_mut_doc *doc, *ret = NULL;
+	yyjson_mut_val *txns, *root;
 	int requested, found;
 
 	if (unlikely(!hashes) || !json_is_array(hashes))
@@ -7454,37 +7519,40 @@ static json_t *get_reqtxns(sdata_t *sdata, const json_t *val, bool downstream)
 	if (unlikely(!requested))
 		goto out;
 
-	txns = get_hash_transactions(sdata, hashes);
-	found = json_array_size(txns);
+	doc = yyjson_mut_doc_new(&ckyyalc);
+	txns = get_hash_transactions(sdata, doc, hashes);
+	found = yyjson_mut_arr_size(txns);
 	if (found) {
-		JSON_CPACK(ret, "{ssso}", "method", stratum_msgs[SM_TRANSACTIONS], "transaction", txns);
+		root = yyjson_mut_obj(doc);
+		yyjson_mut_obj_add_strcpy(doc, root, "method", stratum_msgs[SM_TRANSACTIONS]);
+		yyjson_mut_obj_add_val(doc, root, "transaction", txns);
+		yyjson_mut_doc_set_root(doc, root);
+		ret = doc;
 		LOGINFO("Sending %d found of %d requested txns %s", found, requested,
 			downstream ? "downstream" : "upstream");
 	} else
-		json_decref(txns);
+		yyjson_mut_doc_free(doc);
 out:
 	return ret;
 }
 
 static void parse_remote_reqtxns(sdata_t *sdata, const json_t *val, const int64_t client_id)
 {
-	json_t *ret = get_reqtxns(sdata, val, true);
+	yyjson_mut_doc *ret = get_reqtxns(sdata, val, true);
 
 	if (!ret)
 		return;
-	stratum_add_send(sdata, ret, client_id, SM_TRANSACTIONS);
+	stratum_add_yysend(sdata, ret, client_id, SM_TRANSACTIONS);
 }
 
 void parse_upstream_reqtxns(json_t *val)
 {
-	json_t *ret = get_reqtxns(ckpool.sdata, val, false);
-	char *msg;
+	yyjson_mut_doc *ret = get_reqtxns(ckpool.sdata, val, false);
 
 	if (!ret)
 		return;
-	msg = json_dumps(ret, JSON_NO_UTF8 | JSON_PRESERVE_ORDER | JSON_COMPACT | JSON_EOL);
-	json_decref(ret);
-	connector_upstream_msg(msg);
+	upstream_yyjson(ret);
+	yyjson_mut_doc_free(ret);
 }
 
 static void parse_trusted_msg(sdata_t *sdata, json_t *val, stratum_instance_t *client)
@@ -8213,7 +8281,6 @@ static void *statsupdate(void __maybe_unused *arg)
 		char *fname, *s, *sp;
 		yyjson_mut_doc *doc;
 		tv_t now, diff;
-		json_t *val;
 		FILE *fp;
 		int i;
 
@@ -8489,31 +8556,31 @@ out_status:
 			proxy_t *proxy, *proxytmp, *subproxy, *subtmp;
 
 			mutex_lock(&sdata->proxy_lock);
-			JSON_CPACK(val, "{sI,si,si}",
+			doc = yyjson_mut_pack("{si,si,si}",
 				   "current", sdata->proxy->id,
 				   "active", HASH_COUNT(sdata->proxies),
 				   "total", sdata->proxy_count);
 			mutex_unlock(&sdata->proxy_lock);
 
-			s = json_dumps(val, JSON_NO_UTF8 | JSON_PRESERVE_ORDER);
-			json_decref(val);
+			s = yyjson_mut_write(doc, 0, NULL);
+			yyjson_mut_doc_free(doc);
 			LOGNOTICE("Proxy:%s", s);
 			dealloc(s);
 
 			mutex_lock(&sdata->proxy_lock);
 			HASH_ITER(hh, sdata->proxies, proxy, proxytmp) {
-				JSON_CPACK(val, "{sI,si,sI,sb}",
+				doc = yyjson_mut_pack("{si,si,sI,sb}",
 					   "id", proxy->id,
 					   "subproxies", proxy->subproxy_count,
 					   "clients", proxy->combined_clients,
 					   "alive", !proxy->dead);
-				s = json_dumps(val, JSON_NO_UTF8 | JSON_PRESERVE_ORDER);
-				json_decref(val);
+				s = yyjson_mut_write(doc, 0, NULL);
+				yyjson_mut_doc_free(doc);
 				ASPRINTF(&sp, "Proxies:%s", s);
 				dealloc(s);
 				add_msg_entry(&char_list, &sp);
 				HASH_ITER(sh, proxy->subproxies, subproxy, subtmp) {
-					JSON_CPACK(val, "{sI,si,si,sI,sI,sf,sb}",
+					doc = yyjson_mut_pack("{si,si,si,sI,sI,sf,sb}",
 						   "id", subproxy->id,
 						   "subid", subproxy->subid,
 						   "nonce2len", subproxy->nonce2len,
@@ -8521,8 +8588,8 @@ out_status:
 						   "maxclients", subproxy->max_clients,
 						   "diff", subproxy->diff,
 						   "alive", !subproxy->dead);
-					s = json_dumps(val, JSON_NO_UTF8 | JSON_PRESERVE_ORDER);
-					json_decref(val);
+					s = yyjson_mut_write(doc, 0, NULL);
+					yyjson_mut_doc_free(doc);
 					ASPRINTF(&sp, "Subproxies:%s", s);
 					dealloc(s);
 					add_msg_entry(&char_list, &sp);

@@ -12,6 +12,7 @@ yyjson_mut_doc *_yyjson_mut_pack(const char *file, const char *func, const int l
 				 const char *types, const char *fmt, ...);
 yyjson_mut_val *_yyjson_mut_pack_val(const char *file, const char *func, const int line,
 				     const char *types, yyjson_mut_doc *doc, const char *fmt, ...);
+yyjson_mut_val *json_to_yyjson_val(yyjson_mut_doc *doc, json_t *json);
 yyjson_mut_doc *json_to_yyjson(json_t *json);
 json_t *yyjson_to_json(yyjson_mut_doc *doc);
 extern const yyjson_alc ckyyalc;

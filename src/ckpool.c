@@ -951,6 +951,36 @@ out:
 	return ret;
 }
 
+/* As _send_json_msg but for yyjson docs */
+bool _send_yyjson_msg(connsock_t *cs, yyjson_mut_doc *doc, const char *file, const char *func, const int line)
+{
+	bool ret = false;
+	size_t len;
+	int sent;
+	char *s;
+
+	if (unlikely(!doc)) {
+		LOGWARNING("Empty doc in send_yyjson_msg from %s %s:%d", file, func, line);
+		goto out;
+	}
+	s = yyjson_mut_write(doc, YYJSON_WRITE_NEWLINE_AT_END, &len);
+	if (unlikely(!s)) {
+		LOGWARNING("Empty yyjson write in send_yyjson_msg from %s %s:%d", file, func, line);
+		goto out;
+	}
+	LOGDEBUG("Sending json msg: %s", s);
+	sent = write_socket(cs->fd, s, len);
+	if (sent != (int)len) {
+		LOGNOTICE("Failed to send %d bytes sent %d in send_yyjson_msg", (int)len, sent);
+		goto out_free;
+	}
+	ret = true;
+out_free:
+	dealloc(s);
+out:
+	return ret;
+}
+
 /* Decode a string that should have a json message and return just the contents
  * of the result key or NULL. */
 static json_t *json_result(json_t *val)

@@ -298,6 +298,26 @@ yyjson_mut_val *_yyjson_mut_pack_val(const char *file, const char *func, const i
 	return val;
 }
 
+/* Convert a single jansson value of any type into a yyjson value belonging
+ * to doc via the braindead string conversion. */
+yyjson_mut_val *json_to_yyjson_val(yyjson_mut_doc *doc, json_t *json)
+{
+	yyjson_mut_val *val;
+	yyjson_doc *idoc;
+	char *s;
+
+	if (unlikely(!json))
+		return NULL;
+	s = json_dumps(json, JSON_NO_UTF8 | JSON_ENCODE_ANY);
+	if (unlikely(!s))
+		return NULL;
+	idoc = yyjson_read(s, strlen(s), 0);
+	free(s);
+	val = yyjson_val_mut_copy(doc, yyjson_doc_get_root(idoc));
+	yyjson_doc_free(idoc);
+	return val;
+}
+
 /* Braindead incredibly inefficient conversion to from jansson/yyjson. */
 yyjson_mut_doc *json_to_yyjson(json_t *json)
 {

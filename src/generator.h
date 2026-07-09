@@ -16,7 +16,7 @@
 #define GETBEST_NOTIFY 0
 #define GETBEST_SUCCESS 1
 
-void generator_add_send(json_t *val);
+void generator_add_send(yyjson_mut_doc *doc);
 struct genwork *generator_getbase(void);
 int generator_getbest(char *hash);
 bool generator_checkaddr(const char *addr, bool *script, bool *segwit);

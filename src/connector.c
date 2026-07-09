@@ -418,12 +418,12 @@ static int drop_client(cdata_t *cdata, client_instance_t *client)
 /* For sending the drop command to the upstream pool in passthrough mode */
 static void generator_drop_client(const client_instance_t *client)
 {
-	json_t *val;
+	yyjson_mut_doc *doc;
 
-	JSON_CPACK(val, "{si,sI:ss:si:ss:s[]}", "id", 42, "client_id", client->id, "address",
-		   client->address_name, "server", client->server, "method", "mining.term",
-		   "params");
-	generator_add_send(val);
+	doc = yyjson_mut_pack("{si,sI:ss:si:ss:s[]}", "id", 42, "client_id", client->id, "address",
+			      client->address_name, "server", client->server, "method", "mining.term",
+			      "params");
+	generator_add_send(doc);
 }
 
 static void stratifier_drop_client(const client_instance_t *client)
@@ -593,10 +593,8 @@ reparse:
 				stratifier_add_yyrecv(doc);
 			else if (ckpool.node)
 				stratifier_add_yyrecv(doc);
-			else if (ckpool.passthrough) {
-				generator_add_send(yyjson_to_json(doc));
-				yyjson_mut_doc_free(doc);
-			}
+			else if (ckpool.passthrough)
+				generator_add_send(doc);
 		} else
 			yyjson_mut_doc_free(doc);
 	}
@@ -924,7 +922,8 @@ static void redirect_client(client_instance_t *client)
 {
 	sender_send_t *sender_send;
 	cdata_t *cdata = ckpool.cdata;
-	json_t *val;
+	yyjson_mut_doc *doc;
+	size_t len;
 	char *buf;
 	int num;
 
@@ -932,15 +931,15 @@ static void redirect_client(client_instance_t *client)
 	client->redirected = true;
 
 	num = add_redirect(cdata, client);
-	JSON_CPACK(val, "{sosss[ssi]}", "id", json_null(), "method", "client.reconnect",
-		   "params", ckpool.redirecturl[num], ckpool.redirectport[num], 0);
-	buf = json_dumps(val, JSON_EOL | JSON_COMPACT);
-	json_decref(val);
+	doc = yyjson_mut_pack("{snsss[ssi]}", "id", "method", "client.reconnect",
+			      "params", ckpool.redirecturl[num], ckpool.redirectport[num], 0);
+	buf = yyjson_mut_write(doc, YYJSON_WRITE_NEWLINE_AT_END, &len);
+	yyjson_mut_doc_free(doc);
 
 	sender_send = ckzalloc(sizeof(sender_send_t));
 	sender_send->client = client;
 	sender_send->buf = buf;
-	sender_send->len = strlen(buf);
+	sender_send->len = len;
 	inc_instance_ref(cdata, client);
 
 	mutex_lock(&cdata->sender_lock);
@@ -1168,8 +1167,9 @@ static void passthrough_client(cdata_t *cdata, client_instance_t *client)
 
 static bool connect_upstream(connsock_t *cs)
 {
-	json_t *req, *val = NULL, *res_val, *err_val;
+	json_t *val = NULL, *res_val, *err_val;
 	bool res, ret = false;
+	yyjson_mut_doc *req;
 	float timeout = 10;
 
 	cksem_wait(&cs->sem);
@@ -1186,11 +1186,11 @@ static bool connect_upstream(connsock_t *cs)
 	if (!ckpool.wmem_warn)
 		cs->sendbufsiz = set_sendbufsize(cs->fd, 2097152);
 
-	JSON_CPACK(req, "{ss,s[s]}",
-			"method", "mining.remote",
-			"params", PACKAGE"/"VERSION);
-	res = send_json_msg(cs, req);
-	json_decref(req);
+	req = yyjson_mut_pack("{ss,s[s]}",
+			      "method", "mining.remote",
+			      "params", PACKAGE"/"VERSION);
+	res = send_yyjson_msg(cs, req);
+	yyjson_mut_doc_free(req);
 	if (!res) {
 		LOGWARNING("Failed to send message in connect_upstream");
 		goto out;
@@ -1426,7 +1426,8 @@ static void drop_passthrough_client(cdata_t *cdata, const int64_t id)
 
 char *connector_stats(void *data, const int runtime)
 {
-	json_t *val = json_object(), *subval;
+	yyjson_mut_doc *doc = yyjson_mut_doc_new(&ckyyalc);
+	yyjson_mut_val *root = yyjson_mut_obj(doc), *subval;
 	client_instance_t *client;
 	int objects, generated;
 	cdata_t *cdata = data;
@@ -1434,9 +1435,11 @@ char *connector_stats(void *data, const int runtime)
 	int64_t memsize;
 	char *buf;
 
+	yyjson_mut_doc_set_root(doc, root);
+
 	/* If called in passthrough mode we log stats instead of the stratifier */
 	if (runtime)
-		json_set_int(val, "runtime", runtime);
+		yyjson_mut_obj_add_int(doc, root, "runtime", runtime);
 
 	ck_rlock(&cdata->lock);
 	objects = HASH_COUNT(cdata->clients);
@@ -1444,8 +1447,8 @@ char *connector_stats(void *data, const int runtime)
 	generated = cdata->clients_generated;
 	ck_runlock(&cdata->lock);
 
-	JSON_CPACK(subval, "{si,si,si}", "count", objects, "memory", memsize, "generated", generated);
-	json_set_object(val, "clients", subval);
+	subval = yyjson_mut_pack_val(doc, "{si,sI,si}", "count", objects, "memory", memsize, "generated", generated);
+	yyjson_mut_obj_add_val(doc, root, "clients", subval);
 
 	ck_rlock(&cdata->lock);
 	DL_COUNT2(cdata->dead_clients, client, objects, dead_next);
@@ -1453,8 +1456,8 @@ char *connector_stats(void *data, const int runtime)
 	ck_runlock(&cdata->lock);
 
 	memsize = objects * sizeof(client_instance_t);
-	JSON_CPACK(subval, "{si,si,si}", "count", objects, "memory", memsize, "generated", generated);
-	json_set_object(val, "dead", subval);
+	subval = yyjson_mut_pack_val(doc, "{si,sI,si}", "count", objects, "memory", memsize, "generated", generated);
+	yyjson_mut_obj_add_val(doc, root, "dead", subval);
 
 	objects = 0;
 	memsize = 0;
@@ -1464,16 +1467,16 @@ char *connector_stats(void *data, const int runtime)
 		objects++;
 		memsize += sizeof(sender_send_t) + send->len + 1;
 	}
-	JSON_CPACK(subval, "{si,si,si}", "count", objects, "memory", memsize, "generated", cdata->sends_generated);
-	json_set_object(val, "sends", subval);
+	subval = yyjson_mut_pack_val(doc, "{si,sI,sI}", "count", objects, "memory", memsize, "generated", cdata->sends_generated);
+	yyjson_mut_obj_add_val(doc, root, "sends", subval);
 
-	JSON_CPACK(subval, "{si,si,si}", "count", cdata->sends_queued, "memory", cdata->sends_size, "generated", cdata->sends_delayed);
+	subval = yyjson_mut_pack_val(doc, "{sI,sI,sI}", "count", cdata->sends_queued, "memory", cdata->sends_size, "generated", cdata->sends_delayed);
 	mutex_unlock(&cdata->sender_lock);
 
-	json_set_object(val, "delays", subval);
+	yyjson_mut_obj_add_val(doc, root, "delays", subval);
 
-	buf = json_dumps(val, JSON_NO_UTF8 | JSON_PRESERVE_ORDER);
-	json_decref(val);
+	buf = yyjson_mut_write(doc, 0, NULL);
+	yyjson_mut_doc_free(doc);
 	if (runtime)
 		LOGNOTICE("Passthrough:%s", buf);
 	else
