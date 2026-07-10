@@ -3051,9 +3051,9 @@ static void update_notify(const char *cmd)
 	bool new_block = false, clean;
 	int i, id = 0, subid = 0;
 	yyjson_mut_val *merkle_arr;
+	yyjson_val *val, *merkle_val;
 	char header[272];
 	const char *buf;
-	yyjson_val *val;
 	yyjson_doc *doc;
 	proxy_t *proxy;
 	workbase_t *wb;
@@ -3095,12 +3095,30 @@ static void update_notify(const char *cmd)
 	wb->coinb2len = strlen(wb->coinb2) / 2;
 	wb->coinb2bin = ckalloc(wb->coinb2len);
 	hex2bin(wb->coinb2bin, wb->coinb2, wb->coinb2len);
-	wb->merkles = yyjson_arr_size(yyjson_obj_get(val, "merklehash"));
+	merkle_val = yyjson_obj_get(val, "merklehash");
+	wb->merkles = yyjson_arr_size(merkle_val);
+	/* merklehash is a fixed size array so reject rather than overflow it */
+	if (unlikely(wb->merkles > 16)) {
+		LOGWARNING("Proxy %d:%d notify with %d merkles exceeds max of 16", id, subid,
+			   wb->merkles);
+		clear_workbase(wb);
+		goto out;
+	}
 	wb->yymerkle_doc = yyjson_mut_doc_new(&ckyyalc);
 	merkle_arr = yyjson_mut_arr(wb->yymerkle_doc);
 	yyjson_mut_doc_set_root(wb->yymerkle_doc, merkle_arr);
 	for (i = 0; i < wb->merkles; i++) {
-		strcpy(&wb->merklehash[i][0], yyjson_get_str(yyjson_arr_get(yyjson_obj_get(val, "merklehash"), i)));
+		const char *merkle = yyjson_get_str(yyjson_arr_get(merkle_val, i));
+
+		/* Each merkle hash is a fixed 64 hex char (32 byte) value. Reject
+		 * anything else to avoid overflowing merklehash on copy or
+		 * overreading it in hex2bin. */
+		if (unlikely(!merkle || strlen(merkle) != 64)) {
+			LOGWARNING("Proxy %d:%d notify with invalid merkle hash", id, subid);
+			clear_workbase(wb);
+			goto out;
+		}
+		strcpy(&wb->merklehash[i][0], merkle);
 		hex2bin(&wb->merklebin[i][0], &wb->merklehash[i][0], 32);
 		yyjson_mut_arr_add_str(wb->yymerkle_doc, merkle_arr, &wb->merklehash[i][0]);
 	}
