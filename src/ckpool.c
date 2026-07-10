@@ -1104,13 +1104,6 @@ static void json_get_configstring(char **store, yyjson_val *val, const char *res
 	}
 }
 
-
-
-
-
-
-
-
 /* As the json_get_* helpers above but for immutable yyjson objects */
 bool yyjson_obj_get_string(char **store, yyjson_val *val, const char *res)
 {
