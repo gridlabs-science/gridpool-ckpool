@@ -995,6 +995,12 @@ static bool parse_notify(proxy_instance_t *proxi, yyjson_val *val)
 		goto out;
 
 	merkles = yyjson_arr_size(arr);
+	/* merklehash is a fixed size array so reject rather than overflow it */
+	if (unlikely(merkles > 16)) {
+		LOGWARNING("Proxy %d:%d received notify with %d merkles, exceeding max of 16",
+			   proxi->id, proxi->subid, merkles);
+		goto out;
+	}
 	jid = yyjson_arr_get(val, 0);
 	if (jid) {
 		job_id = yyjson_mut_doc_new(&ckyyalc);
