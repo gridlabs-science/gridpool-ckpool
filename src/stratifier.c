@@ -1937,10 +1937,11 @@ static void add_node_base(yyjson_mut_val *val, bool trusted, int64_t client_id)
 	hex2bin(wb->coinb2bin, wb->coinb2, wb->coinb2len);
 	yyjson_mut_obj_intcpy(&wb->enonce1varlen, val, "enonce1varlen");
 	yyjson_mut_obj_intcpy(&wb->enonce2varlen, val, "enonce2varlen");
-	/* These are used to size buffers when reconstructing the coinbase so
-	 * reject anything outside the possible extranonce sizes */
-	if (unlikely(wb->enonce1varlen < 0 || wb->enonce1varlen > 16 ||
-		     wb->enonce2varlen < 0 || wb->enonce2varlen > 16)) {
+	/* These are used to size buffers when reconstructing the coinbase and
+	 * nonce2, and can only ever be configured in the 2~8 range, so reject
+	 * anything outside the possible extranonce sizes */
+	if (unlikely(wb->enonce1varlen < 0 || wb->enonce1varlen > 8 ||
+		     wb->enonce2varlen < 0 || wb->enonce2varlen > 8)) {
 		LOGWARNING("Node base with invalid enonce1varlen %d enonce2varlen %d",
 			   wb->enonce1varlen, wb->enonce2varlen);
 		clear_workbase(wb);
@@ -7431,6 +7432,12 @@ static void add_node_txns(sdata_t *sdata, yyjson_mut_val *val)
 			LOGERR("Failed to get hash/data in add_node_txns");
 			continue;
 		}
+		/* Txn hashes are fixed 64 hex char values copied into fixed
+		 * size arrays so reject anything else */
+		if (unlikely(strlen(hash) != 64)) {
+			LOGERR("Invalid hash length in add_node_txns");
+			continue;
+		}
 
 		if (add_txn(sdata, &txns, hash, data, false))
 			added++;
@@ -7457,6 +7464,8 @@ static yyjson_mut_val *get_hash_transactions(sdata_t *sdata, yyjson_mut_doc *doc
 		const char *hash = yyjson_mut_get_str(hash_val);
 		txntable_t *txn;
 
+		if (unlikely(!hash))
+			continue;
 		HASH_FIND_STR(sdata->txns, hash, txn);
 		if (!txn)
 			continue;

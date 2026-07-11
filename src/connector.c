@@ -540,6 +540,11 @@ retry:
 		return false;
 	}
 	client->bufofs += ret;
+	/* Always keep the buffer null terminated as we use string functions
+	 * on it below. There is always room for this as non-remote clients
+	 * are bounded to MAX_MSGSIZE and the remote realloc above allows for
+	 * bufofs + MAX_MSGSIZE + 1. */
+	client->buf[client->bufofs] = '\0';
 reparse:
 	eol = memchr(client->buf, '\n', client->bufofs);
 	if (!eol)
