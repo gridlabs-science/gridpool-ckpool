@@ -383,6 +383,19 @@ static inline void yyjson_mut_obj_strcpy(char *buf, yyjson_mut_val *val, const c
 	strcpy(buf, yyjson_mut_get_str(yyjson_mut_obj_get(val, key)) ? : "");
 }
 
+/* As yyjson_mut_obj_strcpy but bounded to size bytes including the null
+ * terminator for copying into fixed sized buffers. */
+static inline void yyjson_mut_obj_strncpy(char *buf, yyjson_mut_val *val, const char *key,
+					  const size_t size)
+{
+	const char *str = yyjson_mut_get_str(yyjson_mut_obj_get(val, key)) ? : "";
+
+	if (likely(size)) {
+		strncpy(buf, str, size - 1);
+		buf[size - 1] = '\0';
+	}
+}
+
 static inline void yyjson_mut_obj_dblcpy(double *dbl, yyjson_mut_val *val, const char *key)
 {
 	*dbl = yyjson_mut_get_num(yyjson_mut_obj_get(val, key));
