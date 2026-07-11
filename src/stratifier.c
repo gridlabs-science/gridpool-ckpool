@@ -1883,15 +1883,15 @@ static void add_node_base(yyjson_mut_val *val, bool trusted, int64_t client_id)
 	/* Some of these fields are empty when running as a remote trusted
 	 * server receiving other workinfos from the upstream pool */
 	yyjson_mut_obj_int64cpy(&wb->id, val, "jobid");
-	yyjson_mut_obj_strcpy(wb->target, val, "target");
+	yyjson_mut_obj_strncpy(wb->target, val, "target", sizeof(wb->target));
 	yyjson_mut_obj_dblcpy(&wb->diff, val, "diff");
 	yyjson_mut_obj_uintcpy(&wb->version, val, "version");
 	yyjson_mut_obj_uintcpy(&wb->curtime, val, "curtime");
-	yyjson_mut_obj_strcpy(wb->prevhash, val, "prevhash");
-	yyjson_mut_obj_strcpy(wb->ntime, val, "ntime");
+	yyjson_mut_obj_strncpy(wb->prevhash, val, "prevhash", sizeof(wb->prevhash));
+	yyjson_mut_obj_strncpy(wb->ntime, val, "ntime", sizeof(wb->ntime));
 	sscanf(wb->ntime, "%x", &wb->ntime32);
-	yyjson_mut_obj_strcpy(wb->bbversion, val, "bbversion");
-	yyjson_mut_obj_strcpy(wb->nbit, val, "nbit");
+	yyjson_mut_obj_strncpy(wb->bbversion, val, "bbversion", sizeof(wb->bbversion));
+	yyjson_mut_obj_strncpy(wb->nbit, val, "nbit", sizeof(wb->nbit));
 	yyjson_mut_obj_uint64cpy(&wb->coinbasevalue, val, "coinbasevalue");
 	yyjson_mut_obj_intcpy(&wb->height, val, "height");
 	yyjson_mut_obj_strdup(&wb->flags, val, "flags");
@@ -7228,8 +7228,8 @@ static void parse_remote_auth(sdata_t *sdata, yyjson_mut_val *val, stratum_insta
 		client = __stratum_add_instance(client_id, remote->address, remote->server);
 	client->remote = true;
 	yyjson_mut_obj_strdup(&client->useragent, val, "useragent");
-	yyjson_mut_obj_strcpy(client->enonce1, val, "enonce1");
-	yyjson_mut_obj_strcpy(client->address, val, "address");
+	yyjson_mut_obj_strncpy(client->enonce1, val, "enonce1", sizeof(client->enonce1));
+	yyjson_mut_obj_strncpy(client->address, val, "address", sizeof(client->address));
 	ck_wunlock(&sdata->instance_lock);
 
 	ckmsgq_add(sdata->sauthq, jp);

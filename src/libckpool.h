@@ -377,14 +377,9 @@ struct unixsock {
 
 typedef struct unixsock unixsock_t;
 
-/* As the json_*cpy helpers above but for mutable yyjson objects */
-static inline void yyjson_mut_obj_strcpy(char *buf, yyjson_mut_val *val, const char *key)
-{
-	strcpy(buf, yyjson_mut_get_str(yyjson_mut_obj_get(val, key)) ? : "");
-}
-
-/* As yyjson_mut_obj_strcpy but bounded to size bytes including the null
- * terminator for copying into fixed sized buffers. */
+/* As the json_*cpy helpers above but for mutable yyjson objects, bounded to
+ * size bytes including the null terminator for copying into fixed sized
+ * buffers. */
 static inline void yyjson_mut_obj_strncpy(char *buf, yyjson_mut_val *val, const char *key,
 					  const size_t size)
 {
