@@ -3116,17 +3116,18 @@ static void update_notify(const char *cmd)
 	yyjson_obj_int64cpy(&wb->id, val, "jobid");
 	yyjson_obj_strncpy(wb->prevhash, val, "prevhash", sizeof(wb->prevhash));
 	yyjson_obj_intcpy(&wb->coinb1len, val, "coinb1len");
-	/* get_sernumber reads up to 5 bytes at offset 42 of coinb1bin so
-	 * reject any coinbase1 too short to hold them, and the coinbase is
-	 * recombined into a fixed 1024 byte buffer during share submission so
-	 * reject unreasonably large values */
-	if (unlikely(wb->coinb1len < 47 || wb->coinb1len > 512)) {
+	/* The coinbase is recombined into a fixed 1024 byte buffer during
+	 * share submission so reject unreasonably sized values */
+	if (unlikely(wb->coinb1len < 1 || wb->coinb1len > 512)) {
 		LOGWARNING("Proxy %d:%d notify with invalid coinb1len %d", id, subid,
 			   wb->coinb1len);
 		clear_workbase(wb);
 		goto out;
 	}
-	wb->coinb1bin = ckzalloc(wb->coinb1len);
+	/* get_sernumber reads up to 5 bytes at offset 42 of coinb1bin so pad
+	 * the zeroed allocation to keep the read in bounds for undersized
+	 * coinbases such as low height regtest ones */
+	wb->coinb1bin = ckzalloc(wb->coinb1len < 47 ? 47 : wb->coinb1len);
 	wb->coinb1 = ckalloc(wb->coinb1len * 2 + 1);
 	yyjson_obj_strncpy(wb->coinb1, val, "coinbase1", wb->coinb1len * 2 + 1);
 	hex2bin(wb->coinb1bin, wb->coinb1, wb->coinb1len);
