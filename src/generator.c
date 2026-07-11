@@ -1017,14 +1017,32 @@ static bool parse_notify(proxy_instance_t *proxi, yyjson_val *val)
 	nbit = yyjson_get_str(yyjson_arr_get(val, 6));
 	ntime = yyjson_get_str(yyjson_arr_get(val, 7));
 	clean = yyjson_is_true(yyjson_arr_get(val, 8));
-	if (!job_id || !prev_hash || !coinbase1 || !coinbase2 || !bbversion || !nbit || !ntime) {
-		if (job_id)
-			yyjson_mut_doc_free(job_id);
-		if (coinbase1)
-			free(coinbase1);
-		if (coinbase2)
-			free(coinbase2);
-		goto out;
+	if (!job_id || !prev_hash || !coinbase1 || !coinbase2 || !bbversion || !nbit || !ntime)
+		goto out_free;
+	/* These are all fixed length hex fields so reject anything else to
+	 * avoid overreading them or overflowing the fixed size arrays they
+	 * are copied to. */
+	if (unlikely(strlen(prev_hash) != 64 || strlen(bbversion) != 8 || strlen(nbit) != 8 ||
+		     strlen(ntime) != 8)) {
+		LOGWARNING("Proxy %d:%d received notify with invalid header field lengths",
+			   proxi->id, proxi->subid);
+		goto out_free;
+	}
+	/* Coinbase values are hex strings and must be of even length */
+	if (unlikely(!strlen(coinbase1) || strlen(coinbase1) % 2 || strlen(coinbase2) % 2)) {
+		LOGWARNING("Proxy %d:%d received notify with invalid coinbase lengths",
+			   proxi->id, proxi->subid);
+		goto out_free;
+	}
+	for (i = 0; i < merkles; i++) {
+		const char *merkle = yyjson_get_str(yyjson_arr_get(arr, i));
+
+		/* Each merkle hash is a fixed 64 hex char (32 byte) value */
+		if (unlikely(!merkle || strlen(merkle) != 64)) {
+			LOGWARNING("Proxy %d:%d received notify with invalid merkle hash",
+				   proxi->id, proxi->subid);
+			goto out_free;
+		}
 	}
 
 	LOGDEBUG("Received new notify from proxy %d:%d", proxi->id, proxi->subid);
@@ -1065,6 +1083,14 @@ static bool parse_notify(proxy_instance_t *proxi, yyjson_val *val)
 	mutex_unlock(&gdata->notify_lock);
 
 	send_notify(proxi, ni);
+	goto out;
+out_free:
+	if (job_id)
+		yyjson_mut_doc_free(job_id);
+	if (coinbase1)
+		free(coinbase1);
+	if (coinbase2)
+		free(coinbase2);
 out:
 	return ret;
 }

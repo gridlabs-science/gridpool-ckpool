@@ -422,9 +422,15 @@ static inline void yyjson_mut_obj_strdup(char **buf, yyjson_mut_val *val, const 
 }
 
 /* As above but for immutable yyjson objects */
-static inline void yyjson_obj_strcpy(char *buf, yyjson_val *val, const char *key)
+static inline void yyjson_obj_strncpy(char *buf, yyjson_val *val, const char *key,
+				      const size_t size)
 {
-	strcpy(buf, yyjson_get_str(yyjson_obj_get(val, key)) ? : "");
+	const char *str = yyjson_get_str(yyjson_obj_get(val, key)) ? : "";
+
+	if (likely(size)) {
+		strncpy(buf, str, size - 1);
+		buf[size - 1] = '\0';
+	}
 }
 
 static inline void yyjson_obj_dblcpy(double *dbl, yyjson_val *val, const char *key)

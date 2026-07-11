@@ -1669,7 +1669,9 @@ static bool rebuild_txns(sdata_t *sdata, workbase_t *wb)
 	if (!hashes || !len)
 		goto out;
 
-	if (unlikely(len < wb->txns * 65)) {
+	/* Use 64 bit arithmetic here as a remotely supplied txn count could
+	 * otherwise overflow the multiplication and defeat this check */
+	if (unlikely((int64_t)wb->txns * 65 > len)) {
 		LOGERR("Truncated transactions in rebuild_txns only %d long", len);
 		goto out;
 	}
@@ -1901,6 +1903,13 @@ static void add_node_base(yyjson_mut_val *val, bool trusted, int64_t client_id)
 	if (!ckpool.proxy) {
 		/* This is a workbase from a trusted remote */
 		yyjson_mut_obj_intcpy(&wb->merkles, val, "merkles");
+		/* merklehash and merklebin are fixed size arrays of 16
+		 * entries so reject rather than overrun them */
+		if (unlikely(wb->merkles < 0 || wb->merkles > 16)) {
+			LOGWARNING("Node base with invalid merkles %d", wb->merkles);
+			clear_workbase(wb);
+			return;
+		}
 		if (!rebuild_txns(sdata, wb))
 			wb->incomplete = true;
 	} else {
@@ -1911,14 +1920,32 @@ static void add_node_base(yyjson_mut_val *val, bool trusted, int64_t client_id)
 	}
 	yyjson_mut_obj_strdup(&wb->coinb1, val, "coinb1");
 	yyjson_mut_obj_intcpy(&wb->coinb1len, val, "coinb1len");
-	wb->coinb1bin = ckzalloc(wb->coinb1len);
-	hex2bin(wb->coinb1bin, wb->coinb1, wb->coinb1len);
 	yyjson_mut_obj_strdup(&wb->coinb2, val, "coinb2");
 	yyjson_mut_obj_intcpy(&wb->coinb2len, val, "coinb2len");
+	/* The coinbase these are recombined into is created in fixed 1024
+	 * byte buffers so reject unreasonably sized coinbase values */
+	if (unlikely(wb->coinb1len < 0 || wb->coinb2len < 0 ||
+		     (int64_t)wb->coinb1len + wb->coinb2len > 900)) {
+		LOGWARNING("Node base with invalid coinb1len %d coinb2len %d",
+			   wb->coinb1len, wb->coinb2len);
+		clear_workbase(wb);
+		return;
+	}
+	wb->coinb1bin = ckzalloc(wb->coinb1len);
+	hex2bin(wb->coinb1bin, wb->coinb1, wb->coinb1len);
 	wb->coinb2bin = ckzalloc(wb->coinb2len);
 	hex2bin(wb->coinb2bin, wb->coinb2, wb->coinb2len);
 	yyjson_mut_obj_intcpy(&wb->enonce1varlen, val, "enonce1varlen");
 	yyjson_mut_obj_intcpy(&wb->enonce2varlen, val, "enonce2varlen");
+	/* These are used to size buffers when reconstructing the coinbase so
+	 * reject anything outside the possible extranonce sizes */
+	if (unlikely(wb->enonce1varlen < 0 || wb->enonce1varlen > 16 ||
+		     wb->enonce2varlen < 0 || wb->enonce2varlen > 16)) {
+		LOGWARNING("Node base with invalid enonce1varlen %d enonce2varlen %d",
+			   wb->enonce1varlen, wb->enonce2varlen);
+		clear_workbase(wb);
+		return;
+	}
 	ts_realtime(&wb->gentime);
 
 	snprintf(header, 270, "%s%s%s%s%s%s%s",
@@ -2217,7 +2244,7 @@ static void submit_node_block(sdata_t *sdata, yyjson_mut_val *val)
 	uchar *enonce1bin = NULL, hash[32], swap[80], flip32[32];
 	uint32_t ntime32, version_mask = 0;
 	char blockhash[68], cdfield[64];
-	int enonce1len, cblen;
+	int enonce1len, cblen = 0;
 	workbase_t *wb = NULL;
 	yyjson_mut_doc *doc;
 	double diff;
@@ -2270,7 +2297,9 @@ static void submit_node_block(sdata_t *sdata, yyjson_mut_val *val)
 	yyjson_mut_obj_get_string(&coinbasehex, val, "coinbasehex");
 	yyjson_mut_obj_get_int(&cblen, val, "cblen");
 	yyjson_mut_obj_get_string(&swaphex, val, "swaphex");
-	if (coinbasehex && cblen && swaphex) {
+	/* The coinbase is created in a fixed 1024 byte buffer so cblen beyond
+	 * that implies a corrupt or malicious message */
+	if (coinbasehex && swaphex && cblen > 0 && cblen <= 1024) {
 		uchar hash1[32];
 
 		coinbase = alloca(cblen);
@@ -3084,15 +3113,33 @@ static void update_notify(const char *cmd)
 	wb->proxy = true;
 
 	yyjson_obj_int64cpy(&wb->id, val, "jobid");
-	yyjson_obj_strcpy(wb->prevhash, val, "prevhash");
+	yyjson_obj_strncpy(wb->prevhash, val, "prevhash", sizeof(wb->prevhash));
 	yyjson_obj_intcpy(&wb->coinb1len, val, "coinb1len");
-	wb->coinb1bin = ckalloc(wb->coinb1len);
+	/* get_sernumber reads up to 5 bytes at offset 42 of coinb1bin so
+	 * reject any coinbase1 too short to hold them, and the coinbase is
+	 * recombined into a fixed 1024 byte buffer during share submission so
+	 * reject unreasonably large values */
+	if (unlikely(wb->coinb1len < 47 || wb->coinb1len > 512)) {
+		LOGWARNING("Proxy %d:%d notify with invalid coinb1len %d", id, subid,
+			   wb->coinb1len);
+		clear_workbase(wb);
+		goto out;
+	}
+	wb->coinb1bin = ckzalloc(wb->coinb1len);
 	wb->coinb1 = ckalloc(wb->coinb1len * 2 + 1);
-	yyjson_obj_strcpy(wb->coinb1, val, "coinbase1");
+	yyjson_obj_strncpy(wb->coinb1, val, "coinbase1", wb->coinb1len * 2 + 1);
 	hex2bin(wb->coinb1bin, wb->coinb1, wb->coinb1len);
 	wb->height = get_sernumber(wb->coinb1bin + 42);
 	yyjson_obj_strdup(&wb->coinb2, val, "coinbase2");
 	wb->coinb2len = strlen(wb->coinb2) / 2;
+	/* As with coinb1len above, bound the size of the coinbase that will
+	 * be recombined into a fixed 1024 byte buffer */
+	if (unlikely(wb->coinb2len > 384)) {
+		LOGWARNING("Proxy %d:%d notify with invalid coinb2len %d", id, subid,
+			   wb->coinb2len);
+		clear_workbase(wb);
+		goto out;
+	}
 	wb->coinb2bin = ckalloc(wb->coinb2len);
 	hex2bin(wb->coinb2bin, wb->coinb2, wb->coinb2len);
 	merkle_val = yyjson_obj_get(val, "merklehash");
@@ -3122,9 +3169,9 @@ static void update_notify(const char *cmd)
 		hex2bin(&wb->merklebin[i][0], &wb->merklehash[i][0], 32);
 		yyjson_mut_arr_add_str(wb->yymerkle_doc, merkle_arr, &wb->merklehash[i][0]);
 	}
-	yyjson_obj_strcpy(wb->bbversion, val, "bbversion");
-	yyjson_obj_strcpy(wb->nbit, val, "nbit");
-	yyjson_obj_strcpy(wb->ntime, val, "ntime");
+	yyjson_obj_strncpy(wb->bbversion, val, "bbversion", sizeof(wb->bbversion));
+	yyjson_obj_strncpy(wb->nbit, val, "nbit", sizeof(wb->nbit));
+	yyjson_obj_strncpy(wb->ntime, val, "ntime", sizeof(wb->ntime));
 	sscanf(wb->ntime, "%x", &wb->ntime32);
 	clean = yyjson_is_true(yyjson_obj_get(val, "clean"));
 	ts_realtime(&wb->gentime);
@@ -5440,7 +5487,16 @@ static user_instance_t *__create_user(sdata_t *sdata, const char *username)
 /* Find user by username or create one if it doesn't already exist */
 static user_instance_t *get_create_user(sdata_t *sdata, const char *username, bool *new_user)
 {
+	char truncated[128];
 	user_instance_t *user;
+
+	/* Usernames are stored in a fixed 128 byte array so truncate any that
+	 * are too long to fit, keeping lookup and creation consistent */
+	if (unlikely(strlen(username) >= sizeof(truncated))) {
+		strncpy(truncated, username, sizeof(truncated) - 1);
+		truncated[sizeof(truncated) - 1] = '\0';
+		username = truncated;
+	}
 
 	ck_wlock(&sdata->instance_lock);
 	HASH_FIND_STR(sdata->user_instances, username, user);
@@ -6946,7 +7002,8 @@ static void parse_subscribe_result(stratum_instance_t *client, yyjson_mut_val *v
 {
 	int len;
 
-	strncpy(client->enonce1, yyjson_mut_get_str(yyjson_mut_arr_get(val, 1)), 16);
+	strncpy(client->enonce1, yyjson_mut_get_str(yyjson_mut_arr_get(val, 1)) ? : "", 16);
+	client->enonce1[16] = '\0';
 	len = strlen(client->enonce1) / 2;
 	hex2bin(client->enonce1bin, client->enonce1, len);
 	memcpy(&client->enonce1_64, client->enonce1bin, 8);
@@ -7266,8 +7323,8 @@ static void parse_remote_block(sdata_t *sdata, yyjson_mut_doc *doc, yyjson_mut_v
 	double diff = 0;
 	int height = 0;
 	int64_t id = 0;
+	int cblen = 0;
 	char *msg;
-	int cblen;
 
 	name = yyjson_mut_get_str(yyjson_mut_obj_get(val, "name"));
 	if (!name)
@@ -7284,7 +7341,9 @@ static void parse_remote_block(sdata_t *sdata, yyjson_mut_doc *doc, yyjson_mut_v
 	yyjson_mut_obj_get_int(&cblen, val, "cblen");
 	yyjson_mut_obj_get_double(&diff, val, "diff");
 
-	if (likely(id && coinbasehex && swaphex && cblen))
+	/* The coinbase is created in a fixed 1024 byte buffer so cblen beyond
+	 * that implies a corrupt or malicious message */
+	if (likely(id && coinbasehex && swaphex && cblen > 0 && cblen <= 1024))
 		wb = get_remote_workbase(sdata, id, client_id);
 
 	if (unlikely(!wb))
