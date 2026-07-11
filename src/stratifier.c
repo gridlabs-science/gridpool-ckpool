@@ -378,6 +378,13 @@ struct txntable {
 	bool seen;
 };
 
+/* Upper bound on the binary length of any single coinbase component (coinb1
+ * or coinb2) accepted from remote/upstream sources. Coinbases are assembled
+ * and hex encoded into buffers sized to their actual content, so this exists
+ * only to keep those allocations bounded rather than to limit legitimate
+ * pools; it is generous enough to cover large direct payout coinbases. */
+#define MAX_COINBASE_LEN 8192
+
 #define ID_AUTH 0
 #define ID_WORKINFO 1
 #define ID_AGEWORKINFO 2
@@ -1922,10 +1929,9 @@ static void add_node_base(yyjson_mut_val *val, bool trusted, int64_t client_id)
 	yyjson_mut_obj_intcpy(&wb->coinb1len, val, "coinb1len");
 	yyjson_mut_obj_strdup(&wb->coinb2, val, "coinb2");
 	yyjson_mut_obj_intcpy(&wb->coinb2len, val, "coinb2len");
-	/* The coinbase these are recombined into is created in fixed 1024
-	 * byte buffers so reject unreasonably sized coinbase values */
+	/* Bound the coinbase allocations against absurd values */
 	if (unlikely(wb->coinb1len < 0 || wb->coinb2len < 0 ||
-		     (int64_t)wb->coinb1len + wb->coinb2len > 900)) {
+		     wb->coinb1len > MAX_COINBASE_LEN || wb->coinb2len > MAX_COINBASE_LEN)) {
 		LOGWARNING("Node base with invalid coinb1len %d coinb2len %d",
 			   wb->coinb1len, wb->coinb2len);
 		clear_workbase(wb);
@@ -2121,15 +2127,19 @@ static char *
 process_block(const workbase_t *wb, const char *coinbase, const int cblen,
 	      const uchar *data, const uchar *hash, uchar *flip32, char *blockhash)
 {
-	char *gbt_block, varint[12];
+	char *gbt_block, *hexcoinbase, varint[12];
 	int txns = wb->txns + 1;
-	char hexcoinbase[1024];
 
 	flip_32(flip32, hash);
 	__bin2hex(blockhash, flip32, 32);
 
-	/* Message format: "data" */
-	gbt_block = ckzalloc(1024);
+	/* Message format: "data". Size the buffers to the actual coinbase
+	 * length: 80 byte header + up to 5 byte txn count varint + coinbase,
+	 * all hex encoded, plus room for the null terminator. Transaction
+	 * data beyond that is appended via realloc_strcat which grows the
+	 * buffer as needed. */
+	hexcoinbase = alloca(cblen * 2 + 1);
+	gbt_block = ckzalloc(80 * 2 + sizeof(varint) * 2 + cblen * 2 + 1);
 	__bin2hex(gbt_block, data, 80);
 	if (txns < 0xfd) {
 		uint8_t val8 = txns;
@@ -2298,9 +2308,9 @@ static void submit_node_block(sdata_t *sdata, yyjson_mut_val *val)
 	yyjson_mut_obj_get_string(&coinbasehex, val, "coinbasehex");
 	yyjson_mut_obj_get_int(&cblen, val, "cblen");
 	yyjson_mut_obj_get_string(&swaphex, val, "swaphex");
-	/* The coinbase is created in a fixed 1024 byte buffer so cblen beyond
-	 * that implies a corrupt or malicious message */
-	if (coinbasehex && swaphex && cblen > 0 && cblen <= 1024) {
+	/* cblen is the full assembled coinbase which is bounded by its two
+	 * components, so reject anything larger as corrupt or malicious */
+	if (coinbasehex && swaphex && cblen > 0 && cblen <= 2 * MAX_COINBASE_LEN) {
 		uchar hash1[32];
 
 		coinbase = alloca(cblen);
@@ -3116,9 +3126,8 @@ static void update_notify(const char *cmd)
 	yyjson_obj_int64cpy(&wb->id, val, "jobid");
 	yyjson_obj_strncpy(wb->prevhash, val, "prevhash", sizeof(wb->prevhash));
 	yyjson_obj_intcpy(&wb->coinb1len, val, "coinb1len");
-	/* The coinbase is recombined into a fixed 1024 byte buffer during
-	 * share submission so reject unreasonably sized values */
-	if (unlikely(wb->coinb1len < 1 || wb->coinb1len > 512)) {
+	/* Bound the coinbase allocations against absurd values */
+	if (unlikely(wb->coinb1len < 1 || wb->coinb1len > MAX_COINBASE_LEN)) {
 		LOGWARNING("Proxy %d:%d notify with invalid coinb1len %d", id, subid,
 			   wb->coinb1len);
 		clear_workbase(wb);
@@ -3134,9 +3143,8 @@ static void update_notify(const char *cmd)
 	wb->height = get_sernumber(wb->coinb1bin + 42);
 	yyjson_obj_strdup(&wb->coinb2, val, "coinbase2");
 	wb->coinb2len = strlen(wb->coinb2) / 2;
-	/* As with coinb1len above, bound the size of the coinbase that will
-	 * be recombined into a fixed 1024 byte buffer */
-	if (unlikely(wb->coinb2len > 384)) {
+	/* As with coinb1len above, bound the coinbase allocations */
+	if (unlikely(wb->coinb2len > MAX_COINBASE_LEN)) {
 		LOGWARNING("Proxy %d:%d notify with invalid coinb2len %d", id, subid,
 			   wb->coinb2len);
 		clear_workbase(wb);
@@ -6081,19 +6089,21 @@ static double submission_diff(sdata_t *sdata, const stratum_instance_t *client, 
 	uchar *coinb2bin;
 	double ret;
 
-	/* Leave ample enough room for donation generation address (~25) + length counter + user generation
-	 * wb->coinb1len + wb->enonce1constlen + wb->enonce1varlen + wb->enonce2varlen + wb->coinb2len + 25 + cb2len */
-
-	coinbase = alloca(1024);
+	/* The coinbase is coinb1 + extranonce (const + var) + extranonce2 +
+	 * coinb2, where coinb2 may be the per-user generation in btcsolo mode.
+	 * The user coinb2 is only valid while holding the instance lock so
+	 * assemble the whole coinbase into a buffer sized to its actual
+	 * content while the lock is held. */
+	ck_rlock(&sdata->instance_lock);
+	coinb2bin = __user_coinb2(client, wb, &cb2len);
+	coinbase = alloca(wb->coinb1len + wb->enonce1constlen + wb->enonce1varlen +
+			  wb->enonce2varlen + cb2len);
 	memcpy(coinbase, wb->coinb1bin, wb->coinb1len);
 	cblen = wb->coinb1len;
 	memcpy(coinbase + cblen, &client->enonce1bin, wb->enonce1constlen + wb->enonce1varlen);
 	cblen += wb->enonce1constlen + wb->enonce1varlen;
 	hex2bin(coinbase + cblen, nonce2, wb->enonce2varlen);
 	cblen += wb->enonce2varlen;
-
-	ck_rlock(&sdata->instance_lock);
-	coinb2bin = __user_coinb2(client, wb, &cb2len);
 	memcpy(coinbase + cblen, coinb2bin, cb2len);
 	ck_runlock(&sdata->instance_lock);
 
@@ -7360,9 +7370,9 @@ static void parse_remote_block(sdata_t *sdata, yyjson_mut_doc *doc, yyjson_mut_v
 	yyjson_mut_obj_get_int(&cblen, val, "cblen");
 	yyjson_mut_obj_get_double(&diff, val, "diff");
 
-	/* The coinbase is created in a fixed 1024 byte buffer so cblen beyond
-	 * that implies a corrupt or malicious message */
-	if (likely(id && coinbasehex && swaphex && cblen > 0 && cblen <= 1024))
+	/* cblen is the full assembled coinbase which is bounded by its two
+	 * components, so reject anything larger as corrupt or malicious */
+	if (likely(id && coinbasehex && swaphex && cblen > 0 && cblen <= 2 * MAX_COINBASE_LEN))
 		wb = get_remote_workbase(sdata, id, client_id);
 
 	if (unlikely(!wb))
