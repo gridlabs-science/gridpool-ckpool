@@ -572,10 +572,17 @@ reparse:
 		yyjson_doc_free(sdoc);
 
 		if (client->passthrough) {
+			double subclient_id = yyjson_mut_get_num(yyjson_mut_obj_get(root, "client_id"));
 			int64_t passthrough_id;
 
-			passthrough_id = yyjson_mut_get_num(yyjson_mut_obj_get(root, "client_id"));
-			passthrough_id = (client->id << 32) | passthrough_id;
+			/* Sanitise the remotely supplied subclient id which may
+			 * only occupy the lower 32 bits, avoiding undefined
+			 * behaviour casting out of range values and preventing
+			 * bits being set in another client's id space. NaN
+			 * fails both comparisons here. */
+			if (unlikely(!(subclient_id >= 0 && subclient_id < 4294967296.0)))
+				subclient_id = 0;
+			passthrough_id = (client->id << 32) | (int64_t)subclient_id;
 			yyjson_mut_obj_remove_key(root, "client_id");
 			yyjson_mut_obj_add_sint(doc, root, "client_id", passthrough_id);
 		} else {

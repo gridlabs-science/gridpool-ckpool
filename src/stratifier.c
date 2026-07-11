@@ -7002,6 +7002,12 @@ static void parse_diff(stratum_instance_t *client, yyjson_mut_val *val)
 {
 	double diff = yyjson_mut_get_num(yyjson_mut_arr_get(val, 0));
 
+	/* Avoid undefined behaviour casting non finite or out of range
+	 * values to the int64_t client diff */
+	if (unlikely(!isfinite(diff) || diff < 0 || diff > 1e18)) {
+		LOGINFO("Discarding invalid diff %lf for client %s", diff, client->identity);
+		return;
+	}
 	LOGINFO("Set client %s to diff %lf", client->identity, diff);
 	client->diff = diff;
 }
