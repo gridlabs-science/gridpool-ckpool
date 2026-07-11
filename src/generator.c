@@ -11,6 +11,7 @@
 
 #include <sys/epoll.h>
 #include <sys/socket.h>
+#include <math.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -1099,7 +1100,9 @@ static bool parse_diff(proxy_instance_t *proxi, yyjson_val *val)
 {
 	double diff = yyjson_get_num(yyjson_arr_get(val, 0));
 
-	if (diff == 0 || diff == proxi->diff)
+	/* Ignore non finite or negative values that would wedge all the diff
+	 * calculations derived from this */
+	if (!isfinite(diff) || diff <= 0 || diff == proxi->diff)
 		return true;
 	proxi->diff = diff;
 	return true;

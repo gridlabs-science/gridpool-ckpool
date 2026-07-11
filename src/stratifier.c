@@ -6208,8 +6208,9 @@ static void check_best_diff(sdata_t *sdata, user_instance_t *user,worker_instanc
 		best_user = true;
 	}
 	/* Check against pool's best diff unlocked first, then recheck once
-	 * the mutex is locked. */
-	if (sdiff > sdata->stats.best_diff) {
+	 * the mutex is locked. Remote shares can arrive before we have a
+	 * current workbase so check it exists before dereferencing it. */
+	if (sdiff > sdata->stats.best_diff && likely(sdata->current_workbase)) {
 		/* Don't set pool best diff if it's a block since we will have
 		 * reset it to zero. */
 		mutex_lock(&sdata->stats_lock);
@@ -6240,10 +6241,10 @@ static bool parse_submit(stratum_instance_t *client, yyjson_mut_val *params_val,
 	char idstring[24] = {};
 	workbase_t *wb = NULL;
 	yyjson_mut_doc *doc;
+	int64_t id = 0;
 	uchar hash[32];
 	int nlen, len;
 	time_t now_t;
-	int64_t id;
 	ts_t now;
 	FILE *fp;
 
@@ -6670,9 +6671,15 @@ static void suggest_diff(stratum_instance_t *client, const char *method,
 		LOGNOTICE("Attempted to suggest diff on unauthorised client %s", client->identity);
 		return;
 	}
-	if (arr_val && yyjson_mut_is_num(arr_val))
-		sdiff = yyjson_mut_get_num(arr_val);
-	else if (sscanf(method, "mining.suggest_difficulty(%"PRId64, &sdiff) != 1) {
+	if (arr_val && yyjson_mut_is_num(arr_val)) {
+		double dsdiff = yyjson_mut_get_num(arr_val);
+
+		/* Avoid undefined behaviour casting non finite or out of range
+		 * values, relying on the mindiff clamp below */
+		if (unlikely(!isfinite(dsdiff) || dsdiff < 0 || dsdiff > 1e18))
+			dsdiff = 0;
+		sdiff = dsdiff;
+	} else if (sscanf(method, "mining.suggest_difficulty(%"PRId64, &sdiff) != 1) {
 		LOGINFO("Failed to parse suggest_difficulty for client %s", client->identity);
 		return;
 	}
@@ -7107,11 +7114,15 @@ static void parse_remote_share(sdata_t *sdata, yyjson_mut_val *val, const char *
 		LOGWARNING("Failed to get workername from remote message %s", buf);
 		return;
 	}
-	if (unlikely(!yyjson_mut_obj_get_double(&diff, val, "diff") || diff < 1)) {
+	if (unlikely(!yyjson_mut_obj_get_double(&diff, val, "diff") || diff < 1 ||
+		     !isfinite(diff))) {
 		LOGWARNING("Unable to parse valid diff from remote message %s", buf);
 		return;
 	}
 	yyjson_mut_obj_get_double(&sdiff, val, "sdiff");
+	/* A non finite sdiff would permanently poison best share values */
+	if (unlikely(!isfinite(sdiff)))
+		sdiff = 0;
 	user = generate_remote_user(workername);
 	user->authorised = true;
 	worker = get_worker(sdata, user, workername);
