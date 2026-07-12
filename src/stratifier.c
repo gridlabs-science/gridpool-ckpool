@@ -385,6 +385,13 @@ struct txntable {
  * pools; it is generous enough to cover large direct payout coinbases. */
 #define MAX_COINBASE_LEN 8192
 
+/* Upper bound on the number of transactions accepted in a block template.
+ * This is the capacity of the fixed 16 entry merkle arrays (2^16 leaves) and
+ * is far above any block a real chain can produce, existing only to keep the
+ * merkle/hash size arithmetic and stack allocations bounded against a corrupt
+ * or malicious template. */
+#define MAX_GBT_TXNS 65535
+
 #define ID_AUTH 0
 #define ID_WORKINFO 1
 #define ID_AGEWORKINFO 2
@@ -1379,6 +1386,15 @@ static txntable_t *wb_merkle_bin_txns(sdata_t *sdata, workbase_t *wb,
 
 	wb->txns = yyjson_arr_size(txn_array);
 	wb->merkles = 0;
+	/* Guard against a corrupt transaction count that would overflow the
+	 * size arithmetic below, oversize the hashbin stack allocation or
+	 * exceed the fixed size merkle arrays. Fall through as a zero
+	 * transaction template rather than deriving work from garbage. */
+	if (unlikely(wb->txns < 0 || wb->txns > MAX_GBT_TXNS)) {
+		LOGWARNING("Invalid transaction count %d in wb_merkle_bin_txns, ignoring transactions",
+			   wb->txns);
+		wb->txns = 0;
+	}
 	binlen = wb->txns * 32 + 32;
 	hashbin = alloca(binlen + 32);
 	memset(hashbin, 0, 32);
@@ -1412,8 +1428,18 @@ static txntable_t *wb_merkle_bin_txns(sdata_t *sdata, workbase_t *wb,
 			hash = yyjson_get_str(yyjson_obj_get(arr_val, "hash"));
 			if (!txid)
 				txid = hash;
-			if (unlikely(!txid)) {
-				LOGERR("Missing txid for transaction in wb_merkle_bins");
+			/* Both are fixed 64 hex char values, txid gets copied into
+			 * the fixed width txn_hashes and hash is used as a fixed
+			 * length lookup key and copied into a fixed buffer in
+			 * add_txn, so reject a corrupt or missing value. */
+			if (unlikely(!txid || strlen(txid) != 64)) {
+				LOGERR("Missing or invalid txid for transaction in wb_merkle_bins");
+				goto out;
+			}
+			if (!hash)
+				hash = txid;
+			else if (unlikely(strlen(hash) != 64)) {
+				LOGERR("Invalid transaction hash in wb_merkle_bins");
 				goto out;
 			}
 			txn = yyjson_get_str(yyjson_obj_get(arr_val, "data"));
@@ -1440,6 +1466,12 @@ static txntable_t *wb_merkle_bin_txns(sdata_t *sdata, workbase_t *wb,
 		while (42) {
 			if (binleft == 1)
 				break;
+			/* The transaction count is bounded to keep this within the
+			 * fixed size merkle arrays but guard the write regardless. */
+			if (unlikely(wb->merkles >= 16)) {
+				LOGWARNING("Merkle count overflow in wb_merkle_bin_txns");
+				goto out;
+			}
 			memcpy(&wb->merklebin[wb->merkles][0], hashbin + 32, 32);
 			__bin2hex(&wb->merklehash[wb->merkles][0], &wb->merklebin[wb->merkles][0], 32);
 			yyjson_mut_arr_add_str(wb->yymerkle_doc, arr, &wb->merklehash[wb->merkles][0]);
@@ -1474,6 +1506,12 @@ static void gbt_witness_data(workbase_t *wb, yyjson_val *txn_array)
 	yyjson_val *arr_val;
 	uchar *hashbin;
 
+	/* Guard against a corrupt transaction count that would overflow the
+	 * size arithmetic or oversize the hashbin stack allocation. */
+	if (unlikely(txncount < 0 || txncount > MAX_GBT_TXNS)) {
+		LOGWARNING("Invalid transaction count %d in gbt_witness_data", txncount);
+		return;
+	}
 	binlen = txncount * 32 + 32;
 	hashbin = alloca(binlen + 32);
 	memset(hashbin, 0, 32);

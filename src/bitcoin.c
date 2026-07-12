@@ -203,13 +203,24 @@ bool gen_gbtbase(connsock_t *cs, gbtbase_t *gbt)
 	}
 	yyjson_mut_doc_set_root(mut_doc, mut_root);
 
-	hex2bin(hash_swap, previousblockhash, 32);
+	/* These are fixed 64 hex char values; reject a corrupt template rather
+	 * than derive work from a partially decoded hash or target. */
+	if (unlikely(!hex2bin(hash_swap, previousblockhash, 32))) {
+		LOGERR("Invalid previousblockhash %s in gbt", previousblockhash);
+		yyjson_mut_doc_free(mut_doc);
+		goto out;
+	}
 	swap_256(tmp, hash_swap);
 	__bin2hex(gbt->prevhash, tmp, 32);
 
-	strncpy(gbt->target, target, 65);
+	if (unlikely(!hex2bin(hash_swap, target, 32))) {
+		LOGERR("Invalid target %s in gbt", target);
+		yyjson_mut_doc_free(mut_doc);
+		goto out;
+	}
+	strncpy(gbt->target, target, sizeof(gbt->target) - 1);
+	gbt->target[sizeof(gbt->target) - 1] = '\0';
 
-	hex2bin(hash_swap, target, 32);
 	bswap_256(tmp, hash_swap);
 	gbt->diff = diff_from_target((uchar *)tmp);
 	yyjson_mut_obj_add_real(mut_doc, mut_root, "diff", gbt->diff);
