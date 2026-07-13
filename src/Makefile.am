@@ -1,6 +1,10 @@
 
 ACLOCAL_AMFLAGS = -I m4
-AM_CPPFLAGS = 
+AM_CPPFLAGS =
+
+if HAVE_CAPNP
+AM_CPPFLAGS += @CAPNP_CFLAGS@ -I$(top_srcdir)/ipc/mining
+endif
 
 native_objs :=
 
@@ -30,7 +34,17 @@ libckpool_a_LIBADD = $(native_objs)
 bin_PROGRAMS = ckpool ckpmsg notifier
 ckpool_SOURCES = ckpool.c generator.c bitcoin.c stratifier.c connector.c \
 		 yyjson.c yyjson_util.c
-ckpool_LDADD = libckpool.a @LIBS@
+ckpool_LDADD = libckpool.a @LIBS@ @CAPNP_LIBS@
+
+if HAVE_CAPNP
+ckpool_SOURCES += $(top_srcdir)/ipc/mining/mining_ipc.cpp \
+	$(top_srcdir)/ipc/mining/init.capnp.c++ \
+	$(top_srcdir)/ipc/mining/mining.capnp.c++ \
+	$(top_srcdir)/ipc/mining/common.capnp.c++ \
+	$(top_srcdir)/ipc/mining/echo.capnp.c++ \
+	$(top_srcdir)/ipc/mining/rpc.capnp.c++ \
+	$(top_srcdir)/ipc/mining/mp/proxy.capnp.c++
+endif
 
 ckpmsg_SOURCES = ckpmsg.c
 ckpmsg_LDADD = libckpool.a

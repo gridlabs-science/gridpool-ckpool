@@ -24,6 +24,10 @@
 #include <zmq.h>
 #endif
 
+#ifdef HAVE_CAPNP
+#include "mining_ipc.h"
+#endif
+
 #include "ckpool.h"
 #include "libckpool.h"
 #include "bitcoin.h"
@@ -8869,6 +8873,61 @@ static void *zmqnotify(void __maybe_unused *arg)
 	return NULL;
 }
 
+#ifdef HAVE_CAPNP
+/* Drive block updates from the bitcoind mining IPC interface, as an
+ * alternative to zmqnotify. The Cap'n Proto client is thread affine so the
+ * connection is established and used entirely on this thread. Waits for chain
+ * tip changes and triggers a work update on each, reconnecting transparently
+ * if bitcoind restarts. The blockupdate poll thread remains as a backstop. */
+static void *ipcnotify(void __maybe_unused *arg)
+{
+	sdata_t *sdata = ckpool.sdata;
+	mining_ipc_ctx *ctx;
+	mining_tip tip = {};
+
+	pthread_detach(pthread_self());
+	rename_proc("ipcnotify");
+
+	/* Connect on this thread, retrying until bitcoind is reachable. */
+	while (!(ctx = mining_ipc_connect(ckpool.btcmining))) {
+		LOGWARNING("Failed to connect to mining IPC %s, retrying in 5s",
+			   ckpool.btcmining);
+		sleep(5);
+	}
+	ckpool.btc_mining_ctx = ctx;
+	LOGNOTICE("Connected to bitcoind mining IPC %s", ckpool.btcmining);
+
+	/* Establish the initial tip, retrying while mining is not yet ready
+	 * (e.g. the node is still completing initial block download). */
+	while (mining_ipc_get_tip(ctx, &tip)) {
+		mining_ipc_try_obtain_mining(ctx);
+		cksleep_ms(1000);
+	}
+	LOGNOTICE("IPC initial tip %s height %d", tip.hash, tip.height);
+
+	while (42) {
+		mining_tip new_tip = {};
+		int rc = mining_ipc_wait_tip_changed(ctx, tip.hash, 60000.0, &new_tip);
+
+		if (!rc) {
+			if (memcmp(new_tip.hash, tip.hash, 64)) {
+				update_base(sdata, GEN_PRIORITY);
+				LOGNOTICE("IPC block hash %s height %d", new_tip.hash,
+					  new_tip.height);
+				tip = new_tip;
+			}
+		} else {
+			/* Timeout or lost connection: try to re-establish, backing
+			 * off while bitcoind remains unavailable. */
+			if (mining_ipc_try_obtain_mining(ctx))
+				cksleep_ms(1000);
+		}
+	}
+
+	return NULL;
+}
+#endif
+
 void *stratifier(void *arg)
 {
 	pthread_t pth_blockupdate, pth_statsupdate, pth_throbber, pth_zmqnotify;
@@ -8962,8 +9021,19 @@ void *stratifier(void *arg)
 		create_pthread(&pth_statsupdate, statsupdate, NULL);
 
 	mutex_init(&sdata->share_lock);
-	if (!ckpool.proxy)
-		create_pthread(&pth_zmqnotify, zmqnotify, NULL);
+	if (!ckpool.proxy) {
+#ifdef HAVE_CAPNP
+		/* Prefer the bitcoind mining IPC interface for block
+		 * notifications when a socket is configured and present,
+		 * falling back to ZMQ otherwise. */
+		if (ckpool.btcmining && !access(ckpool.btcmining, F_OK)) {
+			LOGNOTICE("Using bitcoind mining IPC %s for block notifications",
+				  ckpool.btcmining);
+			create_pthread(&pth_zmqnotify, ipcnotify, NULL);
+		} else
+#endif
+			create_pthread(&pth_zmqnotify, zmqnotify, NULL);
+	}
 
 	ckpool.stratifier_ready = true;
 	LOGWARNING("%s stratifier ready", ckpool.name);

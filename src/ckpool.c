@@ -1574,6 +1574,7 @@ static void parse_config(void)
 	if (arr_val)
 		parse_redirecturls(arr_val);
 	yyjson_obj_get_string(&ckpool.zmqblock, json_conf, "zmqblock");
+	yyjson_obj_get_string(&ckpool.btcmining, json_conf, "btcmining");
 
 	yyjson_doc_free(doc);
 }

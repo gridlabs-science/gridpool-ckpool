@@ -25,6 +25,8 @@ fi
 
 dnl Checks for programs
 AC_PROG_CC
+dnl C++ compiler required for the optional Cap'n Proto mining IPC shim
+AC_PROG_CXX
 # gl_EARLY - maybe later
 AM_PROG_CC_C_O
 LT_INIT([disable-shared])
@@ -102,6 +104,19 @@ AC_SEARCH_LIBS(exp, m, , echo "Error: Required library math not found." && exit 
 AC_SEARCH_LIBS(pthread_mutex_trylock, pthread, , echo "Error: Required library pthreads not found." && exit 1)
 AC_SEARCH_LIBS(zmq_socket, zmq, ZMQ=yes, ZMQ=no)
 
+dnl Optional Cap'n Proto (capnp-rpc) for the Bitcoin Core mining IPC interface.
+dnl When present, ckpool builds the C++ IPC shim (ipc/mining) and prefers the
+dnl IPC interface for block notifications, falling back to ZMQ otherwise.
+CAPNP_CFLAGS=""
+CAPNP_LIBS=""
+PKG_CHECK_MODULES([CAPNP], [capnp-rpc],
+  [CAPNP=yes
+   AC_DEFINE([HAVE_CAPNP], [1], [Have Cap'n Proto (capnp-rpc) for the mining IPC interface])],
+  [CAPNP=no])
+AC_SUBST(CAPNP_CFLAGS)
+AC_SUBST(CAPNP_LIBS)
+AM_CONDITIONAL([HAVE_CAPNP], [test x$CAPNP = xyes])
+
 AC_CONFIG_FILES([Makefile src/Makefile test/Makefile])
 
 AC_OUTPUT
@@ -112,6 +127,7 @@ echo
 echo "Compilation............: make (or gmake)"
 echo "  YASM (Intel ASM).....: $YASM"
 echo "  ZMQ..................: $ZMQ"
+echo "  CAPNP (mining IPC)...: $CAPNP"
 echo "  CPPFLAGS.............: $CPPFLAGS"
 echo "  CFLAGS...............: $CFLAGS"
 echo "  LDFLAGS..............: $LDFLAGS"

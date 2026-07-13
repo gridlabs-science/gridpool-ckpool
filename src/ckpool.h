@@ -189,6 +189,11 @@ struct ckpool_instance {
 	/* Name of protocol used for ZMQ block notifications */
 	char *zmqblock;
 
+	/* Filesystem path to the bitcoind mining IPC unix socket. When set and
+	 * present, block notifications are driven from the IPC interface in
+	 * preference to ZMQ. */
+	char *btcmining;
+
 	/* Threads of main process */
 	pthread_t pth_listener;
 	pthread_t pth_watchdog;
@@ -287,6 +292,10 @@ struct ckpool_instance {
 	void *gdata;
 	void *sdata;
 	void *cdata;
+
+	/* Opaque mining_ipc_ctx* for the bitcoind mining IPC connection, owned
+	 * by the ipcnotify thread. NULL when IPC is unavailable or unused. */
+	void *btc_mining_ctx;
 };
 
 enum stratum_msgtype {
