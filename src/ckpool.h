@@ -192,12 +192,12 @@ struct ckpool_instance {
 	/* Filesystem path to the bitcoind mining IPC unix socket. When set and
 	 * present, block notifications are driven from the IPC interface in
 	 * preference to ZMQ. */
-	char *btcmining;
+	char *ipcmining;
 
 	/* When true, generate block templates from the mining IPC interface
 	 * (createNewBlock) in preference to getblocktemplate, falling back to
 	 * RPC when the IPC interface is unavailable. */
-	bool btctemplate;
+	bool ipctemplate;
 
 	/* Threads of main process */
 	pthread_t pth_listener;
@@ -303,7 +303,7 @@ struct ckpool_instance {
 	void *btc_mining_ctx;
 
 	/* Opaque mining_ipc_service* for IPC block template generation. NULL
-	 * when btctemplate is off or the interface is unavailable. */
+	 * when ipctemplate is off or the interface is unavailable. */
 	void *btc_template_svc;
 };
 

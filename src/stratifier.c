@@ -9041,13 +9041,13 @@ static void *ipcnotify(void __maybe_unused *arg)
 	rename_proc("ipcnotify");
 
 	/* Connect on this thread, retrying until bitcoind is reachable. */
-	while (!(ctx = mining_ipc_connect(ckpool.btcmining))) {
+	while (!(ctx = mining_ipc_connect(ckpool.ipcmining))) {
 		LOGWARNING("Failed to connect to mining IPC %s, retrying in 5s",
-			   ckpool.btcmining);
+			   ckpool.ipcmining);
 		sleep(5);
 	}
 	ckpool.btc_mining_ctx = ctx;
-	LOGNOTICE("Connected to bitcoind mining IPC %s", ckpool.btcmining);
+	LOGNOTICE("Connected to bitcoind mining IPC %s", ckpool.ipcmining);
 
 	/* Establish the initial tip, retrying while mining is not yet ready
 	 * (e.g. the node is still completing initial block download). */
@@ -9178,9 +9178,9 @@ void *stratifier(void *arg)
 		/* Prefer the bitcoind mining IPC interface for block
 		 * notifications when a socket is configured and present,
 		 * falling back to ZMQ otherwise. */
-		if (ckpool.btcmining && !access(ckpool.btcmining, F_OK)) {
+		if (ckpool.ipcmining && !access(ckpool.ipcmining, F_OK)) {
 			LOGNOTICE("Using bitcoind mining IPC %s for block notifications",
-				  ckpool.btcmining);
+				  ckpool.ipcmining);
 			create_pthread(&pth_zmqnotify, ipcnotify, NULL);
 		} else
 #endif
@@ -9191,11 +9191,11 @@ void *stratifier(void *arg)
 		 * interface. The service connection runs its own thread; block
 		 * generation falls back to getblocktemplate when it is not
 		 * ready. */
-		if (ckpool.btctemplate && ckpool.btcmining && !access(ckpool.btcmining, F_OK)) {
-			ckpool.btc_template_svc = mining_ipc_service_connect(ckpool.btcmining);
+		if (ckpool.ipctemplate && ckpool.ipcmining && !access(ckpool.ipcmining, F_OK)) {
+			ckpool.btc_template_svc = mining_ipc_service_connect(ckpool.ipcmining);
 			if (ckpool.btc_template_svc)
 				LOGNOTICE("Started mining IPC block template service on %s",
-					  ckpool.btcmining);
+					  ckpool.ipcmining);
 			else
 				LOGWARNING("Failed to start mining IPC block template service");
 		}
