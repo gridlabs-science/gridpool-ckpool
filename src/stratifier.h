@@ -83,6 +83,10 @@ struct genwork {
 	ckpool_t *ckp;
 	bool proxy; /* This workbase is proxied work */
 
+	bool ipc; /* This workbase came from the mining IPC interface */
+	void *tmpl; /* mining_block_template* handle used to submit an IPC block */
+	uchar coinbase_witness[32]; /* coinbase witness reserved value for IPC submit */
+
 	bool incomplete; /* This is a remote workinfo without all the txn data */
 
 	yyjson_doc *gbtdoc; /* getblocktemplate json */

@@ -194,6 +194,11 @@ struct ckpool_instance {
 	 * preference to ZMQ. */
 	char *btcmining;
 
+	/* When true, generate block templates from the mining IPC interface
+	 * (createNewBlock) in preference to getblocktemplate, falling back to
+	 * RPC when the IPC interface is unavailable. */
+	bool btctemplate;
+
 	/* Threads of main process */
 	pthread_t pth_listener;
 	pthread_t pth_watchdog;
@@ -296,6 +301,10 @@ struct ckpool_instance {
 	/* Opaque mining_ipc_ctx* for the bitcoind mining IPC connection, owned
 	 * by the ipcnotify thread. NULL when IPC is unavailable or unused. */
 	void *btc_mining_ctx;
+
+	/* Opaque mining_ipc_service* for IPC block template generation. NULL
+	 * when btctemplate is off or the interface is unavailable. */
+	void *btc_template_svc;
 };
 
 enum stratum_msgtype {

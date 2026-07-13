@@ -830,6 +830,10 @@ static void clear_workbase(workbase_t *wb)
 		yyjson_mut_doc_free(wb->yymerkle_doc);
 	if (wb->gbtdoc)
 		yyjson_doc_free(wb->gbtdoc);
+#ifdef HAVE_CAPNP
+	if (wb->tmpl)
+		mining_block_template_destroy(wb->tmpl);
+#endif
 	free(wb);
 }
 
@@ -1556,6 +1560,92 @@ static void gbt_witness_data(workbase_t *wb, yyjson_val *txn_array)
 	wb->insert_witness = true;
 }
 
+#ifdef HAVE_CAPNP
+/* Build a workbase from the mining IPC interface (createNewBlock) instead of
+ * getblocktemplate. Populates the same fields the GBT path does so that
+ * generate_coinbase() and all downstream stratum handling work unchanged; the
+ * template handle is retained for submitSolution. Returns NULL on any failure
+ * so the caller can fall back to GBT. */
+static workbase_t *build_ipc_workbase(void)
+{
+	unsigned char branch[MINING_MAX_MERKLES][32];
+	unsigned char header[80], rev[32], swap[32];
+	mining_block_template *tmpl = NULL;
+	yyjson_mut_val *arr;
+	mining_coinbase cb;
+	workbase_t *wb;
+	int count = 0, i;
+	uint32_t v;
+
+	if (mining_ipc_create_new_block(ckpool.btc_template_svc, &tmpl))
+		return NULL;
+	if (mining_ipc_template_header(tmpl, header) ||
+	    mining_ipc_template_coinbase(tmpl, &cb) ||
+	    mining_ipc_template_merkle_path(tmpl, branch, &count) || count > 16) {
+		mining_block_template_destroy(tmpl);
+		return NULL;
+	}
+
+	wb = ckzalloc(sizeof(workbase_t));
+	wb->ckp = &ckpool;
+	wb->ipc = true;
+	wb->tmpl = tmpl;
+
+	/* Header-derived fields in ckpool's stratum-display format. */
+	memcpy(&v, header, 4);
+	wb->version = v;
+	snprintf(wb->bbversion, 9, "%08x", v);
+	memcpy(&v, header + 68, 4);
+	wb->curtime = v;
+	wb->ntime32 = v;
+	snprintf(wb->ntime, 9, "%08x", v);
+	memcpy(&v, header + 72, 4);
+	snprintf(wb->nbit, 9, "%08x", v);
+
+	/* prevhash: the header carries it in internal byte order; reverse to the
+	 * big-endian form gen_gbtbase() receives from RPC, then word-swap. */
+	for (i = 0; i < 32; i++)
+		rev[i] = header[4 + 31 - i];
+	swap_256(swap, rev);
+	__bin2hex(wb->prevhash, swap, 32);
+
+	/* Coinbase-derived fields. */
+	wb->coinbasevalue = cb.block_reward_remaining;
+	wb->height = (int)cb.lock_time + 1;   /* BIP54: lock_time = height - 1 */
+	wb->flags = strdup("");
+
+	/* The witness-commitment required output already holds the finished
+	 * OP_RETURN script; extract its 36-byte witnessdata so generate_coinbase()
+	 * rebuilds the identical output. Layout: value(8) scriptlen(1) OP_RETURN(1)
+	 * push(1) witnessdata(36). */
+	if (cb.required_outputs_count > 0 && cb.required_output_len[0] >= 11 + 36) {
+		__bin2hex(wb->witnessdata, cb.required_output[0] + 11, 36);
+		wb->insert_witness = true;
+	}
+	if (cb.witness_len == sizeof(wb->coinbase_witness))
+		memcpy(wb->coinbase_witness, cb.witness, sizeof(wb->coinbase_witness));
+
+	/* Merkle branch straight from the template — no mempool hashing. */
+	wb->yymerkle_doc = yyjson_mut_doc_new(&ckyyalc);
+	arr = yyjson_mut_arr(wb->yymerkle_doc);
+	yyjson_mut_doc_set_root(wb->yymerkle_doc, arr);
+	wb->merkles = count;
+	for (i = 0; i < count; i++) {
+		memcpy(&wb->merklebin[i][0], branch[i], 32);
+		__bin2hex(&wb->merklehash[i][0], branch[i], 32);
+		yyjson_mut_arr_add_str(wb->yymerkle_doc, arr, &wb->merklehash[i][0]);
+	}
+
+	/* submitSolution reconstructs the block server-side, so no local
+	 * transaction data is required. */
+	wb->txns = 0;
+	wb->txn_hashes = ckzalloc(1);
+
+	LOGINFO("Generated IPC block template for height %d, %d merkles", wb->height, count);
+	return wb;
+}
+#endif
+
 /* This function assumes it will only receive a valid json gbt base template
  * since checking should have been done earlier, and creates the base template
  * for generating work templates. This is a ckmsgq so all uses of this function
@@ -1566,35 +1656,46 @@ static void block_update(int *prio)
 	const char *witnessdata_check;
 	sdata_t *sdata = ckpool.sdata;
 	yyjson_val *txn_array;
-	txntable_t *txns;
+	txntable_t *txns = NULL;
 	int retries = 0;
-	workbase_t *wb;
+	workbase_t *wb = NULL;
 
-retry:
-	wb = generator_getbase();
-	if (unlikely(!wb)) {
-		if (retries++ < 5 || *prio == GEN_PRIORITY) {
-			LOGWARNING("Generator returned failure in update_base, retry #%d", retries);
-			goto retry;
-		}
-		LOGWARNING("Generator failed in update_base after retrying");
-		goto out;
+#ifdef HAVE_CAPNP
+	/* Prefer the mining IPC interface for block templates when enabled and
+	 * ready, falling back to getblocktemplate below on any failure. */
+	if (ckpool.btc_template_svc && mining_ipc_service_ready(ckpool.btc_template_svc)) {
+		wb = build_ipc_workbase();
+		if (unlikely(!wb))
+			LOGWARNING("IPC template generation failed, falling back to getblocktemplate");
 	}
-	if (unlikely(retries))
-		LOGWARNING("Generator succeeded in update_base after retrying");
+#endif
+	if (!wb) {
+retry:
+		wb = generator_getbase();
+		if (unlikely(!wb)) {
+			if (retries++ < 5 || *prio == GEN_PRIORITY) {
+				LOGWARNING("Generator returned failure in update_base, retry #%d", retries);
+				goto retry;
+			}
+			LOGWARNING("Generator failed in update_base after retrying");
+			goto out;
+		}
+		if (unlikely(retries))
+			LOGWARNING("Generator succeeded in update_base after retrying");
 
-	txn_array = yyjson_obj_get(wb->gbtroot, "transactions");
-	txns = wb_merkle_bin_txns(sdata, wb, txn_array, true);
+		txn_array = yyjson_obj_get(wb->gbtroot, "transactions");
+		txns = wb_merkle_bin_txns(sdata, wb, txn_array, true);
 
-	wb->insert_witness = false;
+		wb->insert_witness = false;
 
-	witnessdata_check = yyjson_get_str(yyjson_obj_get(wb->gbtroot, "default_witness_commitment"));
-	if (likely(witnessdata_check)) {
-		LOGDEBUG("Default witness commitment present, adding witness data");
-		gbt_witness_data(wb, txn_array);
-		// Verify against the pre-calculated value if it exists. Skip the size/OP_RETURN bytes.
-		if (wb->insert_witness && safecmp(witnessdata_check + 4, wb->witnessdata) != 0)
-			LOGERR("Witness from btcd: %s. Calculated Witness: %s", witnessdata_check + 4, wb->witnessdata);
+		witnessdata_check = yyjson_get_str(yyjson_obj_get(wb->gbtroot, "default_witness_commitment"));
+		if (likely(witnessdata_check)) {
+			LOGDEBUG("Default witness commitment present, adding witness data");
+			gbt_witness_data(wb, txn_array);
+			// Verify against the pre-calculated value if it exists. Skip the size/OP_RETURN bytes.
+			if (wb->insert_witness && safecmp(witnessdata_check + 4, wb->witnessdata) != 0)
+				LOGERR("Witness from btcd: %s. Calculated Witness: %s", witnessdata_check + 4, wb->witnessdata);
+		}
 	}
 
 	generate_coinbase(wb);
@@ -6020,6 +6121,43 @@ downstream_block(sdata_t *sdata, yyjson_mut_doc *val, const int cblen,
 	yyjson_mut_doc_free(block_doc);
 }
 
+#ifdef HAVE_CAPNP
+/* Submit a solved IPC-templated block via the mining interface. The coinbase
+ * must be witness-serialised (marker+flag + coinbase witness reserved value);
+ * the server reconstructs and validates the full block. Returns true if
+ * accepted. */
+static bool ipc_submit_block(const workbase_t *wb, const uchar *data, const char *coinbase,
+			     const int cblen, const uint32_t ntime32)
+{
+	unsigned char *wcb;
+	uint32_t version, nonce;
+	int wl, accepted = 0;
+
+	if (unlikely(!wb->tmpl))
+		return false;
+	memcpy(&version, data, 4);
+	memcpy(&nonce, data + 76, 4);
+
+	wcb = ckalloc(cblen + 40);
+	memcpy(wcb, coinbase, 4);			/* tx version */
+	wl = 4;
+	wcb[wl++] = 0x00; wcb[wl++] = 0x01;		/* segwit marker + flag */
+	memcpy(wcb + wl, coinbase + 4, cblen - 8);	/* inputs + outputs */
+	wl += cblen - 8;
+	wcb[wl++] = 0x01;				/* 1 witness stack item */
+	wcb[wl++] = 0x20;				/* 32 byte reserved value */
+	memcpy(wcb + wl, wb->coinbase_witness, 32);
+	wl += 32;
+	memcpy(wcb + wl, coinbase + cblen - 4, 4);	/* lock time */
+	wl += 4;
+
+	if (mining_ipc_submit_solution(wb->tmpl, version, ntime32, nonce, wcb, wl, &accepted))
+		accepted = 0;
+	free(wcb);
+	return accepted;
+}
+#endif
+
 /* We should already be holding a wb readcount. Needs to be entered with
  * client holding a ref count. */
 static void
@@ -6050,7 +6188,16 @@ test_blocksolve(const stratum_instance_t *client, const workbase_t *wb, const uc
 	ts_realtime(&ts_now);
 	sprintf(cdfield, "%lu,%lu", ts_now.tv_sec, ts_now.tv_nsec);
 
-	gbt_block = process_block(wb, coinbase, cblen, data, hash, flip32, blockhash);
+#ifdef HAVE_CAPNP
+	/* IPC blocks are submitted via the mining interface, not by assembling
+	 * the block hex, so just derive the block hash here. */
+	if (wb->ipc) {
+		flip_32(flip32, hash);
+		__bin2hex(blockhash, flip32, 32);
+		gbt_block = NULL;
+	} else
+#endif
+		gbt_block = process_block(wb, coinbase, cblen, data, hash, flip32, blockhash);
 	send_node_block(sdata, client->enonce1, nonce, nonce2, ntime32, version_mask,
 			wb->id, diff, client->id, coinbase, cblen, data);
 
@@ -6088,7 +6235,12 @@ test_blocksolve(const stratum_instance_t *client, const workbase_t *wb, const uc
 
 	/* Submit block locally after sending it to remote locations avoiding
 	 * the delay of local verification */
-	ret = local_block_submit(gbt_block, flip32, wb->height);
+#ifdef HAVE_CAPNP
+	if (wb->ipc)
+		ret = ipc_submit_block(wb, data, coinbase, cblen, ntime32);
+	else
+#endif
+		ret = local_block_submit(gbt_block, flip32, wb->height);
 	if (ret)
 		block_solve(doc);
 	else
@@ -9033,6 +9185,21 @@ void *stratifier(void *arg)
 		} else
 #endif
 			create_pthread(&pth_zmqnotify, zmqnotify, NULL);
+
+#ifdef HAVE_CAPNP
+		/* Optionally generate block templates from the mining IPC
+		 * interface. The service connection runs its own thread; block
+		 * generation falls back to getblocktemplate when it is not
+		 * ready. */
+		if (ckpool.btctemplate && ckpool.btcmining && !access(ckpool.btcmining, F_OK)) {
+			ckpool.btc_template_svc = mining_ipc_service_connect(ckpool.btcmining);
+			if (ckpool.btc_template_svc)
+				LOGNOTICE("Started mining IPC block template service on %s",
+					  ckpool.btcmining);
+			else
+				LOGWARNING("Failed to start mining IPC block template service");
+		}
+#endif
 	}
 
 	ckpool.stratifier_ready = true;
