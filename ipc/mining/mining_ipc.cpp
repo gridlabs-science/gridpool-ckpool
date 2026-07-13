@@ -38,6 +38,12 @@
 #include <memory>
 #include <string>
 #include <sys/stat.h>
+#include <unistd.h>
+
+#include <condition_variable>
+#include <mutex>
+#include <stdexcept>
+#include <thread>
 
 namespace {
 
@@ -287,6 +293,212 @@ private:
 	mp::Thread::Client exec_thread_{nullptr};
 };
 
+/* --------------------------------------------------------------------------
+ * Phase 2: the "service" connection for block template generation.
+ *
+ * An EzRpcClient is thread affine, but template operations are driven from
+ * several ckpool threads (block_update, share submission). We therefore own
+ * the client on a dedicated internal thread running the kj event loop, and
+ * marshal every call onto it with kj::Executor::executeSync(), which accepts a
+ * promise-returning functor and drives the loop until it resolves. Callers on
+ * any (non-kj) thread block until the result is available.
+ * -------------------------------------------------------------------------- */
+
+struct BlockTemplateHolder; // defined after MiningService
+
+class MiningService {
+public:
+	explicit MiningService(std::string socket_path) : socket_path_(std::move(socket_path)) {}
+
+	~MiningService()
+	{
+		/* The capnp capability members reference the event loop owned by the
+		 * service thread and must be destroyed there, not on the caller's
+		 * thread. Reset them on the service thread; the member destructors
+		 * that then run on this thread are no-ops on null capabilities. */
+		if (executor_) {
+			try {
+				executor_->executeSync([this]() {
+					mining_ = Mining::Client(nullptr);
+					exec_thread_ = mp::Thread::Client(nullptr);
+					callback_thread_ = mp::Thread::Client(nullptr);
+					our_threadmap_ = mp::ThreadMap::Client(nullptr);
+					server_threadmap_ = mp::ThreadMap::Client(nullptr);
+				});
+			} catch (...) {
+			}
+		}
+		stop_.store(true);
+		/* The service thread runs a kj loop for the process lifetime; detach
+		 * rather than join to avoid blocking on the cross-thread wakeup. */
+		if (thread_.joinable())
+			thread_.detach();
+	}
+
+	/* Start the background thread and block until its first connect attempt
+	 * has completed. Returns true if the thread started (regardless of
+	 * whether mining is yet available). */
+	bool start()
+	{
+		thread_ = std::thread([this] { thread_main(); });
+		std::unique_lock<std::mutex> lock(mutex_);
+		cv_.wait(lock, [this] { return started_; });
+		return true;
+	}
+
+	bool ready() const { return have_mining_.load(); }
+
+	/* Marshal a promise-returning functor onto the service thread and block
+	 * for its result. Must only be called once started_ is set. */
+	template <typename Func>
+	auto run(Func &&func) -> decltype(std::declval<kj::Executor>().executeSync(std::declval<Func>()))
+	{
+		return executor_->executeSync(kj::fwd<Func>(func));
+	}
+
+	/* Fill a Proxy.Context for a Mining/BlockTemplate call. Runs on the
+	 * service thread. */
+	template <typename CtxBuilder>
+	void fill_context(CtxBuilder ctx)
+	{
+		ctx.setThread(exec_thread_);
+		ctx.setCallbackThread(callback_thread_);
+	}
+
+	int create_new_block(BlockTemplateHolder **out);
+
+	Mining::Client &mining() { return mining_; }
+
+private:
+	/* Runs on the service thread: connect, handshake, then drive the loop
+	 * forever, reconnecting if the connection drops or the node is absent. */
+	void thread_main()
+	{
+		bool signalled = false;
+		while (!stop_.load()) {
+			try {
+				struct stat st;
+				if (stat(socket_path_.c_str(), &st) != 0)
+					throw std::runtime_error("socket absent");
+
+				capnp::EzRpcClient client("unix:" + socket_path_);
+				auto &ws = client.getWaitScope();
+				/* The executor is per-thread and stable for the thread's
+				 * life, so record it once. */
+				if (!executor_)
+					executor_ = &kj::getCurrentThreadExecutor();
+
+				auto init = client.getMain<Init>();
+				handshake(client, init);
+
+				connected_.store(true);
+				signal_started(signalled);
+
+				/* Drive the loop until the connection drops. */
+				kj::NEVER_DONE.wait(ws);
+			} catch (...) {
+				connected_.store(false);
+				have_mining_.store(false);
+				signal_started(signalled);
+			}
+			if (stop_.load())
+				break;
+			/* Socket absent or connection lost: wait before retrying so
+			 * we do not spin while bitcoind is down. */
+			usleep(1000000);
+		}
+	}
+
+	/* Perform the ThreadMap exchange + obtain a Mining capability. Runs on
+	 * the service thread; throws on transport failure. */
+	void handshake(capnp::EzRpcClient &client, Init::Client &init)
+	{
+		auto &ws = client.getWaitScope();
+
+		our_threadmap_ = mp::ThreadMap::Client(kj::heap<ThreadMapServer>());
+		{
+			auto mk = our_threadmap_.makeThreadRequest();
+			mk.setName("ckpool-svc-callback");
+			callback_thread_ = mk.send().wait(ws).getResult();
+		}
+		{
+			auto req = init.constructRequest();
+			req.setThreadMap(our_threadmap_);
+			server_threadmap_ = req.send().wait(ws).getThreadMap();
+		}
+		{
+			auto mk = server_threadmap_.makeThreadRequest();
+			mk.setName("bitcoin-svc-execution");
+			exec_thread_ = mk.send().wait(ws).getResult();
+		}
+
+		/* Obtaining Mining may fail while the node is still starting up;
+		 * that is not fatal, we just retry on the next call. */
+		try {
+			auto req = init.makeMiningRequest();
+			fill_context(req.initContext());
+			mining_ = req.send().wait(ws).getResult();
+
+			auto probe = mining_.isInitialBlockDownloadRequest();
+			fill_context(probe.initContext());
+			probe.send().wait(ws);
+
+			have_mining_.store(true);
+		} catch (const kj::Exception &) {
+			have_mining_.store(false);
+		}
+	}
+
+	void signal_started(bool &signalled)
+	{
+		if (signalled)
+			return;
+		signalled = true;
+		{
+			std::lock_guard<std::mutex> lock(mutex_);
+			started_ = true;
+		}
+		cv_.notify_all();
+	}
+
+	std::string socket_path_;
+	std::thread thread_;
+	std::atomic<bool> stop_{false};
+	std::atomic<bool> connected_{false};
+	std::atomic<bool> have_mining_{false};
+
+	bool started_ = false;
+	std::mutex mutex_;
+	std::condition_variable cv_;
+
+	const kj::Executor *executor_ = nullptr;
+
+	Mining::Client mining_{nullptr};
+	mp::ThreadMap::Client our_threadmap_{nullptr};
+	mp::ThreadMap::Client server_threadmap_{nullptr};
+	mp::Thread::Client callback_thread_{nullptr};
+	mp::Thread::Client exec_thread_{nullptr};
+};
+
+/* A template capability, owned by (and only touched on) the service thread. */
+struct BlockTemplateHolder {
+	MiningService *svc;
+	BlockTemplate::Client client;
+};
+
+int MiningService::create_new_block(BlockTemplateHolder **out)
+{
+	auto *holder = run([this]() -> kj::Promise<BlockTemplateHolder *> {
+		auto req = mining_.createNewBlockRequest();
+		fill_context(req.initContext());
+		return req.send().then([this](auto resp) {
+			return new BlockTemplateHolder{ this, resp.getResult() };
+		});
+	});
+	*out = holder;
+	return holder ? 0 : -1;
+}
+
 } // namespace
 
 /* --------------------------------------------------------------------------
@@ -346,6 +558,186 @@ int mining_ipc_wait_tip_changed(mining_ipc_ctx *ctx, const char *current_tip_hex
 									    timeout_seconds, out_new_tip);
 	} catch (...) {
 		return -1;
+	}
+}
+
+/* --- Phase 2: block template service --- */
+
+mining_ipc_service *mining_ipc_service_connect(const char *socket_path)
+{
+	try {
+		auto *svc = new MiningService(socket_path ? socket_path : "");
+		svc->start();
+		return reinterpret_cast<mining_ipc_service *>(svc);
+	} catch (...) {
+		return nullptr;
+	}
+}
+
+void mining_ipc_service_disconnect(mining_ipc_service *svc)
+{
+	delete reinterpret_cast<MiningService *>(svc);
+}
+
+int mining_ipc_service_ready(mining_ipc_service *svc)
+{
+	if (!svc)
+		return 0;
+	return reinterpret_cast<MiningService *>(svc)->ready() ? 1 : 0;
+}
+
+int mining_ipc_create_new_block(mining_ipc_service *svc, mining_block_template **out)
+{
+	if (!svc || !out)
+		return -1;
+	auto *service = reinterpret_cast<MiningService *>(svc);
+	if (!service->ready())
+		return -1;
+	try {
+		BlockTemplateHolder *holder = nullptr;
+		if (service->create_new_block(&holder) != 0 || !holder)
+			return -1;
+		*out = reinterpret_cast<mining_block_template *>(holder);
+		return 0;
+	} catch (...) {
+		return -1;
+	}
+}
+
+int mining_ipc_template_header(mining_block_template *t, unsigned char header[80])
+{
+	if (!t || !header)
+		return -1;
+	auto *h = reinterpret_cast<BlockTemplateHolder *>(t);
+	try {
+		h->svc->run([h, header]() -> kj::Promise<void> {
+			auto req = h->client.getBlockHeaderRequest();
+			h->svc->fill_context(req.initContext());
+			return req.send().then([header](auto resp) {
+				auto data = resp.getResult();
+				KJ_REQUIRE(data.size() == 80, "block header not 80 bytes");
+				memcpy(header, data.begin(), 80);
+			});
+		});
+		return 0;
+	} catch (...) {
+		return -1;
+	}
+}
+
+int mining_ipc_template_coinbase(mining_block_template *t, mining_coinbase *out)
+{
+	if (!t || !out)
+		return -1;
+	auto *h = reinterpret_cast<BlockTemplateHolder *>(t);
+	try {
+		memset(out, 0, sizeof(*out));
+		h->svc->run([h, out]() -> kj::Promise<void> {
+			auto req = h->client.getCoinbaseTxRequest();
+			h->svc->fill_context(req.initContext());
+			return req.send().then([out](auto resp) {
+				auto cb = resp.getResult();
+				out->version = cb.getVersion();
+				out->sequence = cb.getSequence();
+				out->block_reward_remaining = cb.getBlockRewardRemaining();
+				out->lock_time = cb.getLockTime();
+
+				auto ssp = cb.getScriptSigPrefix();
+				KJ_REQUIRE(ssp.size() <= MINING_MAX_SCRIPTSIG, "script_sig_prefix too large");
+				memcpy(out->script_sig_prefix, ssp.begin(), ssp.size());
+				out->script_sig_prefix_len = ssp.size();
+
+				auto wit = cb.getWitness();
+				KJ_REQUIRE(wit.size() <= MINING_MAX_WITNESS, "witness too large");
+				memcpy(out->witness, wit.begin(), wit.size());
+				out->witness_len = wit.size();
+
+				auto outs = cb.getRequiredOutputs();
+				KJ_REQUIRE(outs.size() <= MINING_MAX_REQUIRED_OUTPUTS, "too many required outputs");
+				out->required_outputs_count = outs.size();
+				for (uint i = 0; i < outs.size(); i++) {
+					auto o = outs[i];
+					KJ_REQUIRE(o.size() <= MINING_MAX_OUTPUT, "required output too large");
+					memcpy(out->required_output[i], o.begin(), o.size());
+					out->required_output_len[i] = o.size();
+				}
+			});
+		});
+		return 0;
+	} catch (...) {
+		return -1;
+	}
+}
+
+int mining_ipc_template_merkle_path(mining_block_template *t,
+				    unsigned char branch[MINING_MAX_MERKLES][32], int *count)
+{
+	if (!t || !branch || !count)
+		return -1;
+	auto *h = reinterpret_cast<BlockTemplateHolder *>(t);
+	try {
+		int n = h->svc->run([h, branch]() -> kj::Promise<int> {
+			auto req = h->client.getCoinbaseMerklePathRequest();
+			h->svc->fill_context(req.initContext());
+			return req.send().then([branch](auto resp) -> int {
+				auto path = resp.getResult();
+				KJ_REQUIRE(path.size() <= MINING_MAX_MERKLES, "too many merkle branches");
+				for (uint i = 0; i < path.size(); i++) {
+					KJ_REQUIRE(path[i].size() == 32, "merkle branch not 32 bytes");
+					memcpy(branch[i], path[i].begin(), 32);
+				}
+				return (int)path.size();
+			});
+		});
+		*count = n;
+		return 0;
+	} catch (...) {
+		return -1;
+	}
+}
+
+int mining_ipc_submit_solution(mining_block_template *t, uint32_t version,
+			       uint32_t timestamp, uint32_t nonce,
+			       const unsigned char *coinbase, size_t coinbase_len, int *accepted)
+{
+	if (!t || !coinbase || !accepted)
+		return -1;
+	auto *h = reinterpret_cast<BlockTemplateHolder *>(t);
+	try {
+		bool ok = h->svc->run([=]() -> kj::Promise<bool> {
+			auto req = h->client.submitSolutionRequest();
+			h->svc->fill_context(req.initContext());
+			req.setVersion(version);
+			req.setTimestamp(timestamp);
+			req.setNonce(nonce);
+			req.setCoinbase(kj::arrayPtr(reinterpret_cast<const capnp::byte *>(coinbase),
+						     coinbase_len));
+			return req.send().then([](auto resp) -> bool {
+				return resp.getResult();
+			});
+		});
+		*accepted = ok ? 1 : 0;
+		return 0;
+	} catch (...) {
+		return -1;
+	}
+}
+
+void mining_block_template_destroy(mining_block_template *t)
+{
+	if (!t)
+		return;
+	auto *h = reinterpret_cast<BlockTemplateHolder *>(t);
+	try {
+		/* The capability must be dropped on the service thread; dropping it
+		 * releases the template server-side via capnp reference counting. */
+		h->svc->run([h]() -> kj::Promise<void> {
+			delete h;
+			return kj::READY_NOW;
+		});
+	} catch (...) {
+		/* If the service thread is gone we cannot free it cleanly; leak
+		 * rather than risk touching capnp state off-thread. */
 	}
 }
 
