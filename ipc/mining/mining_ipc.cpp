@@ -315,8 +315,11 @@ public:
 		/* The capnp capability members reference the event loop owned by the
 		 * service thread and must be destroyed there, not on the caller's
 		 * thread. Reset them on the service thread; the member destructors
-		 * that then run on this thread are no-ops on null capabilities. */
-		if (executor_) {
+		 * that then run on this thread are no-ops on null capabilities. Only
+		 * attempt this while connected: if the service thread is looping in
+		 * reconnect (not in the event loop) executeSync would block until it
+		 * returned, potentially forever if bitcoind is down. */
+		if (executor_ && connected_.load()) {
 			try {
 				executor_->executeSync([this]() {
 					mining_ = Mining::Client(nullptr);

@@ -1614,13 +1614,33 @@ static workbase_t *build_ipc_workbase(void)
 	wb->height = (int)cb.lock_time + 1;   /* BIP54: lock_time = height - 1 */
 	wb->flags = strdup("");
 
-	/* The witness-commitment required output already holds the finished
-	 * OP_RETURN script; extract its 36-byte witnessdata so generate_coinbase()
-	 * rebuilds the identical output. Layout: value(8) scriptlen(1) OP_RETURN(1)
-	 * push(1) witnessdata(36). */
-	if (cb.required_outputs_count > 0 && cb.required_output_len[0] >= 11 + 36) {
-		__bin2hex(wb->witnessdata, cb.required_output[0] + 11, 36);
-		wb->insert_witness = true;
+	/* Locate the segwit witness commitment among the required outputs and
+	 * extract its 36-byte witnessdata so generate_coinbase() rebuilds the
+	 * identical output. A required output is the commitment when its
+	 * scriptPubKey is OP_RETURN <push 36> aa21a9ed <32 byte hash>, i.e.
+	 * output layout value(8) scriptlen(1) 6a 24 aa 21 a9 ed <hash>, so bytes
+	 * 9..14 are 6a 24 aa 21 a9 ed and the 36-byte witnessdata starts at 11.
+	 * ckpool can only represent the commitment in its coinbase, so any other
+	 * required output means the template must be built from getblocktemplate
+	 * instead. */
+	for (i = 0; i < cb.required_outputs_count; i++) {
+		const unsigned char *ro = cb.required_output[i];
+		size_t rl = cb.required_output_len[i];
+
+		if (rl >= 11 + 36 && ro[9] == 0x6a && ro[10] == 0x24 && ro[11] == 0xaa &&
+		    ro[12] == 0x21 && ro[13] == 0xa9 && ro[14] == 0xed) {
+			if (unlikely(wb->insert_witness)) {
+				LOGWARNING("IPC template has multiple witness commitments, using getblocktemplate");
+				clear_workbase(wb);
+				return NULL;
+			}
+			__bin2hex(wb->witnessdata, ro + 11, 36);
+			wb->insert_witness = true;
+		} else {
+			LOGWARNING("IPC template requires an unrepresentable coinbase output, using getblocktemplate");
+			clear_workbase(wb);
+			return NULL;
+		}
 	}
 	if (cb.witness_len == sizeof(wb->coinbase_witness))
 		memcpy(wb->coinbase_witness, cb.witness, sizeof(wb->coinbase_witness));
@@ -6133,7 +6153,10 @@ static bool ipc_submit_block(const workbase_t *wb, const uchar *data, const char
 	uint32_t version, nonce;
 	int wl, accepted = 0;
 
-	if (unlikely(!wb->tmpl))
+	/* A real coinbase is well over 60 bytes; guard the tx version(4) +
+	 * body(cblen-8) + locktime(4) arithmetic below against a degenerate
+	 * length. */
+	if (unlikely(!wb->tmpl || cblen < 12))
 		return false;
 	memcpy(&version, data, 4);
 	memcpy(&nonce, data + 76, 4);
