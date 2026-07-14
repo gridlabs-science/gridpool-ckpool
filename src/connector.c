@@ -112,6 +112,8 @@ struct redirect {
 	int redirect_no;
 };
 
+typedef struct csender csender_t;
+
 /* Private data for the connector */
 struct connector_data {
 	cklock_t lock;
@@ -127,7 +129,6 @@ struct connector_data {
 	int epfd;
 
 	bool accept;
-	pthread_t pth_sender;
 	pthread_t pth_receiver;
 
 	/* For the hashtable of all clients */
@@ -148,17 +149,12 @@ struct connector_data {
 	/* client message event process queue */
 	ckmsgq_t *cevents;
 
-	/* For the linked list of pending sends */
-	sender_send_t *sender_sends;
-
-	int64_t sends_generated;
-	int64_t sends_delayed;
-	int64_t sends_queued;
-	int64_t sends_size;
-
-	/* For protecting the pending sends list */
-	mutex_t sender_lock;
-	pthread_cond_t sender_cond;
+	/* Array of nsenders independent sender shards. Each shard is its own
+	 * thread with its own pending-send queue, handling the disjoint set of
+	 * clients whose id modulo nsenders equals the shard index, so per-client
+	 * send state needs no locking. */
+	int nsenders;
+	csender_t *csenders;
 
 	/* Hash list of all redirected IP address in redirector mode */
 	redirect_t *redirects;
@@ -174,6 +170,26 @@ struct connector_data {
 };
 
 typedef struct connector_data cdata_t;
+
+/* One shard of the sender: an independent thread with its own pending-send
+ * queue and lock/cond, handling clients whose id modulo cdata->nsenders equals
+ * this shard's index. */
+struct csender {
+	cdata_t *cdata;
+	int id;
+
+	/* Linked list of pending sends for this shard */
+	sender_send_t *sends;
+
+	int64_t sends_generated;
+	int64_t sends_delayed;
+	int64_t sends_queued;
+	int64_t sends_size;
+
+	mutex_t lock;
+	pthread_cond_t cond;
+	pthread_t pth;
+};
 
 void connector_upstream_msg(char *msg)
 {
@@ -859,10 +875,13 @@ static void clear_sender_send(sender_send_t *sender_send, cdata_t *cdata)
  * only send to those clients ready to receive data. */
 static void *sender(void *arg)
 {
-	cdata_t *cdata = (cdata_t *)arg;
+	csender_t *cs = (csender_t *)arg;
+	cdata_t *cdata = cs->cdata;
 	sender_send_t *sends = NULL;
+	char procname[16];
 
-	rename_proc("csender");
+	snprintf(procname, sizeof(procname), "csender%d", cs->id);
+	rename_proc(procname);
 
 	while (42) {
 		int64_t sends_queued = 0, sends_size = 0;
@@ -879,27 +898,42 @@ static void *sender(void *arg)
 			}
 		}
 
-		mutex_lock(&cdata->sender_lock);
-		cdata->sends_delayed += sends_queued;
-		cdata->sends_queued = sends_queued;
-		cdata->sends_size = sends_size;
+		mutex_lock(&cs->lock);
+		cs->sends_delayed += sends_queued;
+		cs->sends_queued = sends_queued;
+		cs->sends_size = sends_size;
 		/* Poll every 10ms if there are no new sends. */
-		if (!cdata->sender_sends) {
+		if (!cs->sends) {
 			const ts_t polltime = {0, 10000000};
 			ts_t timeout_ts;
 
 			ts_realtime(&timeout_ts);
 			timeraddspec(&timeout_ts, &polltime);
-			cond_timedwait(&cdata->sender_cond, &cdata->sender_lock, &timeout_ts);
+			cond_timedwait(&cs->cond, &cs->lock, &timeout_ts);
 		}
-		if (cdata->sender_sends) {
-			DL_CONCAT(sends, cdata->sender_sends);
-			cdata->sender_sends = NULL;
+		if (cs->sends) {
+			DL_CONCAT(sends, cs->sends);
+			cs->sends = NULL;
 		}
-		mutex_unlock(&cdata->sender_lock);
+		mutex_unlock(&cs->lock);
 	}
 	/* We shouldn't get here unless there's an error */
 	return NULL;
+}
+
+/* Append a pending send to the shard owning this client (client id modulo
+ * nsenders) and wake that sender thread. A given client always maps to the
+ * same shard, keeping its send state single-writer. */
+static void queue_sender_send(cdata_t *cdata, const client_instance_t *client,
+			      sender_send_t *sender_send)
+{
+	csender_t *cs = &cdata->csenders[(uint64_t)client->id % cdata->nsenders];
+
+	mutex_lock(&cs->lock);
+	cs->sends_generated++;
+	DL_APPEND(cs->sends, sender_send);
+	pthread_cond_signal(&cs->cond);
+	mutex_unlock(&cs->lock);
 }
 
 static int add_redirect(cdata_t *cdata, client_instance_t *client)
@@ -950,11 +984,7 @@ static void redirect_client(client_instance_t *client)
 	sender_send->len = len;
 	inc_instance_ref(cdata, client);
 
-	mutex_lock(&cdata->sender_lock);
-	cdata->sends_generated++;
-	DL_APPEND(cdata->sender_sends, sender_send);
-	pthread_cond_signal(&cdata->sender_cond);
-	mutex_unlock(&cdata->sender_lock);
+	queue_sender_send(cdata, client, sender_send);
 }
 
 /* Look for accepted shares in redirector mode to know we can redirect this
@@ -1103,11 +1133,7 @@ static void send_client(cdata_t *cdata, const int64_t id, char *buf)
 	sender_send->buf = buf;
 	sender_send->len = len;
 
-	mutex_lock(&cdata->sender_lock);
-	cdata->sends_generated++;
-	DL_APPEND(cdata->sender_sends, sender_send);
-	pthread_cond_signal(&cdata->sender_cond);
-	mutex_unlock(&cdata->sender_lock);
+	queue_sender_send(cdata, client, sender_send);
 
 	/* Redirect after sending response to shares and authorise */
 	if (unlikely(redirect))
@@ -1467,18 +1493,31 @@ char *connector_stats(void *data, const int runtime)
 	objects = 0;
 	memsize = 0;
 
-	mutex_lock(&cdata->sender_lock);
-	DL_FOREACH(cdata->sender_sends, send) {
-		objects++;
-		memsize += sizeof(sender_send_t) + send->len + 1;
+	/* Aggregate the pending-send and stats counters across all shards. */
+	{
+		int64_t sends_generated = 0, sends_queued = 0, sends_size = 0, sends_delayed = 0;
+		int i;
+
+		for (i = 0; i < cdata->nsenders; i++) {
+			csender_t *cs = &cdata->csenders[i];
+
+			mutex_lock(&cs->lock);
+			DL_FOREACH(cs->sends, send) {
+				objects++;
+				memsize += sizeof(sender_send_t) + send->len + 1;
+			}
+			sends_generated += cs->sends_generated;
+			sends_queued += cs->sends_queued;
+			sends_size += cs->sends_size;
+			sends_delayed += cs->sends_delayed;
+			mutex_unlock(&cs->lock);
+		}
+		subval = yyjson_mut_pack_val(doc, "{si,sI,sI}", "count", objects, "memory", memsize, "generated", sends_generated);
+		yyjson_mut_obj_add_val(doc, root, "sends", subval);
+
+		subval = yyjson_mut_pack_val(doc, "{sI,sI,sI}", "count", sends_queued, "memory", sends_size, "generated", sends_delayed);
+		yyjson_mut_obj_add_val(doc, root, "delays", subval);
 	}
-	subval = yyjson_mut_pack_val(doc, "{si,sI,sI}", "count", objects, "memory", memsize, "generated", cdata->sends_generated);
-	yyjson_mut_obj_add_val(doc, root, "sends", subval);
-
-	subval = yyjson_mut_pack_val(doc, "{sI,sI,sI}", "count", cdata->sends_queued, "memory", cdata->sends_size, "generated", cdata->sends_delayed);
-	mutex_unlock(&cdata->sender_lock);
-
-	yyjson_mut_obj_add_val(doc, root, "delays", subval);
 
 	buf = yyjson_mut_write(doc, 0, NULL);
 	yyjson_mut_doc_free(doc);
@@ -1742,10 +1781,18 @@ void *connector(void *arg)
 	/* Set the client id to the highest serverurl count to distinguish
 	 * them from the server fds in epoll. */
 	cdata->client_ids = ckpool.serverurls;
-	mutex_init(&cdata->sender_lock);
-	cond_init(&cdata->sender_cond);
-	create_pthread(&cdata->pth_sender, sender, cdata);
 	threads = sysconf(_SC_NPROCESSORS_ONLN) / 2 ? : 1;
+	cdata->nsenders = threads;
+	cdata->csenders = ckzalloc(sizeof(csender_t) * cdata->nsenders);
+	for (i = 0; i < cdata->nsenders; i++) {
+		csender_t *cs = &cdata->csenders[i];
+
+		cs->cdata = cdata;
+		cs->id = i;
+		mutex_init(&cs->lock);
+		cond_init(&cs->cond);
+		create_pthread(&cs->pth, sender, cs);
+	}
 	cdata->cevents = create_ckmsgqs("cevent", &client_event_processor, threads);
 	create_pthread(&cdata->pth_receiver, receiver, cdata);
 	cdata->start_time = time(NULL);
