@@ -9059,6 +9059,7 @@ static void *ipcnotify(void __maybe_unused *arg)
 	sdata_t *sdata = ckpool.sdata;
 	mining_ipc_ctx *ctx;
 	mining_tip tip = {};
+	bool healthy = true;
 
 	pthread_detach(pthread_self());
 	rename_proc("ipcnotify");
@@ -9087,11 +9088,13 @@ static void *ipcnotify(void __maybe_unused *arg)
 
 	while (!ckpool.shutdown) {
 		mining_tip new_tip = {};
-		/* Wait in short windows (5s) rather than one long call so a
-		 * shutdown is noticed promptly and we are seldom blocked
-		 * mid-request: closing the socket while a long waitTipChanged
-		 * is executing wedges bitcoind's IPC server. */
-		int rc = mining_ipc_wait_tip_changed(ctx, tip.hash, 5000.0, &new_tip);
+		/* Wait for a tip change. A new block returns immediately; the
+		 * timeout (in seconds) only bounds how often we wake to notice a
+		 * dropped connection or a shutdown request. A short window also
+		 * means we are rarely blocked mid-request, since closing the
+		 * socket while a long waitTipChanged executes wedges bitcoind's
+		 * IPC server. */
+		int rc = mining_ipc_wait_tip_changed(ctx, tip.hash, 5.0, &new_tip);
 
 		if (!rc) {
 			if (memcmp(new_tip.hash, tip.hash, 64)) {
@@ -9100,11 +9103,29 @@ static void *ipcnotify(void __maybe_unused *arg)
 					  new_tip.height);
 				tip = new_tip;
 			}
-		} else {
-			/* Timeout or lost connection: try to re-establish, backing
-			 * off while bitcoind remains unavailable. */
-			if (mining_ipc_try_obtain_mining(ctx))
-				cksleep_ms(1000);
+			continue;
+		}
+
+		/* Non-zero means the connection was lost (a benign timeout returns
+		 * the current tip, not an error). Re-obtain a Mining client,
+		 * reconnecting to a restarted bitcoind if necessary. */
+		if (mining_ipc_try_obtain_mining(ctx)) {
+			if (healthy) {
+				LOGWARNING("Lost connection to mining IPC %s, reconnecting",
+					   ckpool.ipcmining);
+				healthy = false;
+			}
+			cksleep_ms(1000);
+			continue;
+		}
+		/* Usable again. On recovery from an outage, resync the tip so a
+		 * block found while we were disconnected triggers an update. */
+		if (!healthy) {
+			healthy = true;
+			if (!mining_ipc_get_tip(ctx, &tip))
+				update_base(sdata, GEN_PRIORITY);
+			LOGNOTICE("Reconnected to mining IPC %s tip %s height %d",
+				  ckpool.ipcmining, tip.hash, tip.height);
 		}
 	}
 out:
@@ -9129,7 +9150,9 @@ void stratifier_shutdown_ipc(void)
 {
 	int waited = 0;
 
-	while (ckpool.btc_mining_ctx && waited++ < 100)
+	/* Bound the wait comfortably above the ipcnotify wait window (5s) so it
+	 * has time to notice the shutdown, break out and disconnect. */
+	while (ckpool.btc_mining_ctx && waited++ < 200)
 		cksleep_ms(50);
 }
 

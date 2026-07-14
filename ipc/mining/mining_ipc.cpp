@@ -189,8 +189,11 @@ public:
 			if (!resp.getHasResult())
 				return -1;
 			return fill_tip(resp.getResult(), out);
-		} catch (const kj::Exception &e) {
-			note_disconnect(e);
+		} catch (const kj::Exception &) {
+			/* getTip has no timeout and does not throw on success, so any
+			 * exception means the connection is gone. Force a reconnect
+			 * regardless of the reported exception type. */
+			connected_.store(false);
 			return -1;
 		}
 	}
@@ -213,11 +216,18 @@ public:
 			auto resp = req.send().wait(ws);
 			return fill_tip(resp.getResult(), out);
 		} catch (const kj::Exception &e) {
-			const char *desc = e.getDescription().cStr();
-			/* A timeout is a normal, non-fatal outcome. */
-			if (strstr(desc, "timeout") || strstr(desc, "Timeout"))
-				return -1;
-			note_disconnect(e);
+			/* bitcoind signals a genuine timeout by returning the current
+			 * tip, not by throwing, so any exception here is a failure. A
+			 * lost connection is not always reported as DISCONNECTED (the
+			 * failure can surface through the proxied execution thread as a
+			 * generic error), so treat any non-timeout exception as a
+			 * dropped connection and force a reconnect. */
+			if (e.getType() != kj::Exception::Type::DISCONNECTED) {
+				const char *desc = e.getDescription().cStr();
+				if (strstr(desc, "timeout") || strstr(desc, "Timeout"))
+					return -1;
+			}
+			connected_.store(false);
 			return -1;
 		}
 	}
