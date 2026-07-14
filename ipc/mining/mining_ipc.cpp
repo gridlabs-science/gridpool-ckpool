@@ -276,6 +276,18 @@ private:
 		connected_.store(false);
 		have_mining_ = false;
 		have_threads_ = false;
+		/* The capability handles below are imported from (or exported to)
+		 * client_'s RpcSystem and hold hooks into it. They MUST be
+		 * destroyed while that RpcSystem is still alive, so drop them
+		 * before resetting client_ — otherwise the later destruction of a
+		 * dangling cap dereferences the freed RpcSystem and crashes. This
+		 * is the reconnect path (bitcoind restarting) where these are
+		 * live. */
+		mining_ = Mining::Client(nullptr);
+		exec_thread_ = mp::Thread::Client(nullptr);
+		callback_thread_ = mp::Thread::Client(nullptr);
+		server_threadmap_ = mp::ThreadMap::Client(nullptr);
+		our_threadmap_ = mp::ThreadMap::Client(nullptr);
 		client_.reset();
 	}
 
@@ -321,13 +333,7 @@ public:
 		 * returned, potentially forever if bitcoind is down. */
 		if (executor_ && connected_.load()) {
 			try {
-				executor_->executeSync([this]() {
-					mining_ = Mining::Client(nullptr);
-					exec_thread_ = mp::Thread::Client(nullptr);
-					callback_thread_ = mp::Thread::Client(nullptr);
-					our_threadmap_ = mp::ThreadMap::Client(nullptr);
-					server_threadmap_ = mp::ThreadMap::Client(nullptr);
-				});
+				executor_->executeSync([this]() { reset_caps(); });
 			} catch (...) {
 			}
 		}
@@ -385,6 +391,11 @@ private:
 					throw std::runtime_error("socket absent");
 
 				capnp::EzRpcClient client("unix:" + socket_path_);
+				/* Drop the caps derived from this client on any scope
+				 * exit while it is still alive (this defer runs before
+				 * client destructs), so a disconnect/reconnect never
+				 * leaves a dangling cap referencing a freed RpcSystem. */
+				KJ_DEFER(reset_caps());
 				auto &ws = client.getWaitScope();
 				/* The executor is per-thread and stable for the thread's
 				 * life, so record it once. */
@@ -450,6 +461,18 @@ private:
 		} catch (const kj::Exception &) {
 			have_mining_.store(false);
 		}
+	}
+
+	/* Drop every capnp cap derived from the current client. Must run on the
+	 * service thread while that client's RpcSystem is still alive, otherwise
+	 * the later destruction of a cap dereferences a freed RpcSystem. */
+	void reset_caps()
+	{
+		mining_ = Mining::Client(nullptr);
+		exec_thread_ = mp::Thread::Client(nullptr);
+		callback_thread_ = mp::Thread::Client(nullptr);
+		server_threadmap_ = mp::ThreadMap::Client(nullptr);
+		our_threadmap_ = mp::ThreadMap::Client(nullptr);
 	}
 
 	void signal_started(bool &signalled)
