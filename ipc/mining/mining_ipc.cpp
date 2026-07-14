@@ -25,7 +25,9 @@
 #include "mining_ipc.h"
 
 #include <capnp/ez-rpc.h>
+#include <kj/async-io.h>
 #include <kj/exception.h>
+#include <kj/time.h>
 
 #include "init.capnp.h"
 #include "mining.capnp.h"
@@ -418,8 +420,26 @@ private:
 				connected_.store(true);
 				signal_started(signalled);
 
-				/* Drive the loop until the connection drops. */
-				kj::NEVER_DONE.wait(ws);
+				/* Drive the loop, probing periodically so a dropped
+				 * connection is actually detected. Unlike the notifier
+				 * (which always has an in-flight waitTipChanged that
+				 * throws on disconnect), this thread has no outstanding
+				 * call, so kj::NEVER_DONE.wait() would park forever and
+				 * a restarted bitcoind would go unnoticed — leaving
+				 * template generation stuck on the getblocktemplate
+				 * fallback. The timed wait also runs the event loop, so
+				 * the cross-thread executeSync calls that drive template
+				 * generation continue to be serviced between probes. */
+				auto &timer = client.getIoProvider().getTimer();
+				while (!stop_.load()) {
+					timer.afterDelay(5 * kj::SECONDS).wait(ws);
+					/* A live round-trip: returns on success (even during
+					 * IBD), throws if the connection has dropped, which
+					 * unwinds to the reconnect path below. */
+					auto probe = mining_.isInitialBlockDownloadRequest();
+					fill_context(probe.initContext());
+					probe.send().wait(ws);
+				}
 			} catch (...) {
 				connected_.store(false);
 				have_mining_.store(false);
