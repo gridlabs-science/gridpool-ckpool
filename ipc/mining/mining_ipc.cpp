@@ -25,6 +25,7 @@
 #include "mining_ipc.h"
 
 #include <capnp/ez-rpc.h>
+#include <capnp/rpc-twoparty.h>
 #include <kj/async-io.h>
 #include <kj/exception.h>
 #include <kj/time.h>
@@ -396,26 +397,38 @@ private:
 	void thread_main()
 	{
 		bool signalled = false;
+		/* One event loop for the whole thread lifetime. Cross-thread
+		 * callers marshal template calls onto executor_, which is bound to
+		 * this loop; recreating the loop per connection (as EzRpcClient
+		 * does) would leave executor_ dangling after the first reconnect
+		 * and crash the next executeSync. So we own a persistent loop here
+		 * and rebuild only the transport (TwoPartyClient over a fresh
+		 * socket) on each connect. */
+		auto io = kj::setupAsyncIo();
+		auto &ws = io.waitScope;
+		executor_ = &kj::getCurrentThreadExecutor();
+
 		while (!stop_.load()) {
 			try {
 				struct stat st;
 				if (stat(socket_path_.c_str(), &st) != 0)
 					throw std::runtime_error("socket absent");
 
-				capnp::EzRpcClient client("unix:" + socket_path_);
+				/* Fresh transport for this attempt. conn is declared
+				 * before client so it outlives the TwoPartyClient that
+				 * references it. */
+				auto addr = io.provider->getNetwork()
+						.parseAddress("unix:" + socket_path_).wait(ws);
+				auto conn = addr->connect().wait(ws);
+				capnp::TwoPartyClient client(*conn);
 				/* Drop the caps derived from this client on any scope
 				 * exit while it is still alive (this defer runs before
 				 * client destructs), so a disconnect/reconnect never
 				 * leaves a dangling cap referencing a freed RpcSystem. */
 				KJ_DEFER(reset_caps());
-				auto &ws = client.getWaitScope();
-				/* The executor is per-thread and stable for the thread's
-				 * life, so record it once. */
-				if (!executor_)
-					executor_ = &kj::getCurrentThreadExecutor();
 
-				auto init = client.getMain<Init>();
-				handshake(client, init);
+				auto init = client.bootstrap().castAs<Init>();
+				handshake(ws, init);
 
 				connected_.store(true);
 				signal_started(signalled);
@@ -430,7 +443,7 @@ private:
 				 * fallback. The timed wait also runs the event loop, so
 				 * the cross-thread executeSync calls that drive template
 				 * generation continue to be serviced between probes. */
-				auto &timer = client.getIoProvider().getTimer();
+				auto &timer = io.provider->getTimer();
 				while (!stop_.load()) {
 					timer.afterDelay(5 * kj::SECONDS).wait(ws);
 					/* A live round-trip: returns on success (even during
@@ -455,10 +468,8 @@ private:
 
 	/* Perform the ThreadMap exchange + obtain a Mining capability. Runs on
 	 * the service thread; throws on transport failure. */
-	void handshake(capnp::EzRpcClient &client, Init::Client &init)
+	void handshake(kj::WaitScope &ws, Init::Client &init)
 	{
-		auto &ws = client.getWaitScope();
-
 		our_threadmap_ = mp::ThreadMap::Client(kj::heap<ThreadMapServer>());
 		{
 			auto mk = our_threadmap_.makeThreadRequest();
