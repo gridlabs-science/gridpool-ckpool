@@ -269,7 +269,7 @@ static bool server_alive(server_instance_t *si, bool pinging)
 		goto out;
 	}
 	si->alive = cs->alive = ret = true;
-	LOGNOTICE("Server alive: %s:%s", cs->url, cs->port);
+	LOGWARNING("Server alive: %s:%s", cs->url, cs->port);
 out:
 	/* Close the file handle */
 	close(fd);

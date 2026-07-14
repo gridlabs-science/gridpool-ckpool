@@ -9074,7 +9074,7 @@ static void *ipcnotify(void __maybe_unused *arg)
 		sleep(5);
 	}
 	ckpool.btc_mining_ctx = ctx;
-	LOGNOTICE("Connected to bitcoind mining IPC %s", ckpool.ipcmining);
+	LOGWARNING("Connected to bitcoind mining IPC %s", ckpool.ipcmining);
 
 	/* Establish the initial tip, retrying while mining is not yet ready
 	 * (e.g. the node is still completing initial block download). */
@@ -9124,7 +9124,7 @@ static void *ipcnotify(void __maybe_unused *arg)
 			healthy = true;
 			if (!mining_ipc_get_tip(ctx, &tip))
 				update_base(sdata, GEN_PRIORITY);
-			LOGNOTICE("Reconnected to mining IPC %s tip %s height %d",
+			LOGWARNING("Reconnected to mining IPC %s tip %s height %d",
 				  ckpool.ipcmining, tip.hash, tip.height);
 		}
 	}
