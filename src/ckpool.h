@@ -186,6 +186,10 @@ struct ckpool_instance {
 	bool stratifier_ready;
 	bool connector_ready;
 
+	/* Set true once a shutdown has been initiated so long-running threads
+	 * (notably the mining IPC notifier) can stop and disconnect cleanly. */
+	bool shutdown;
+
 	/* Name of protocol used for ZMQ block notifications */
 	char *zmqblock;
 

@@ -9063,8 +9063,11 @@ static void *ipcnotify(void __maybe_unused *arg)
 	pthread_detach(pthread_self());
 	rename_proc("ipcnotify");
 
-	/* Connect on this thread, retrying until bitcoind is reachable. */
+	/* Connect on this thread, retrying until bitcoind is reachable or a
+	 * shutdown is requested. */
 	while (!(ctx = mining_ipc_connect(ckpool.ipcmining))) {
+		if (ckpool.shutdown)
+			return NULL;
 		LOGWARNING("Failed to connect to mining IPC %s, retrying in 5s",
 			   ckpool.ipcmining);
 		sleep(5);
@@ -9075,14 +9078,20 @@ static void *ipcnotify(void __maybe_unused *arg)
 	/* Establish the initial tip, retrying while mining is not yet ready
 	 * (e.g. the node is still completing initial block download). */
 	while (mining_ipc_get_tip(ctx, &tip)) {
+		if (ckpool.shutdown)
+			goto out;
 		mining_ipc_try_obtain_mining(ctx);
 		cksleep_ms(1000);
 	}
 	LOGNOTICE("IPC initial tip %s height %d", tip.hash, tip.height);
 
-	while (42) {
+	while (!ckpool.shutdown) {
 		mining_tip new_tip = {};
-		int rc = mining_ipc_wait_tip_changed(ctx, tip.hash, 60000.0, &new_tip);
+		/* Wait in short windows (5s) rather than one long call so a
+		 * shutdown is noticed promptly and we are seldom blocked
+		 * mid-request: closing the socket while a long waitTipChanged
+		 * is executing wedges bitcoind's IPC server. */
+		int rc = mining_ipc_wait_tip_changed(ctx, tip.hash, 5000.0, &new_tip);
 
 		if (!rc) {
 			if (memcmp(new_tip.hash, tip.hash, 64)) {
@@ -9098,10 +9107,31 @@ static void *ipcnotify(void __maybe_unused *arg)
 				cksleep_ms(1000);
 		}
 	}
-
+out:
+	/* capnp clients are thread affine: disconnect here, on the thread that
+	 * owns the connection, so bitcoind sees an orderly RPC-level shutdown
+	 * (any in-flight request cancelled cleanly) rather than a socket
+	 * abruptly closed by process exit. Clearing btc_mining_ctx signals the
+	 * main thread that teardown is complete. */
+	LOGNOTICE("Disconnecting mining IPC on shutdown");
+	ckpool.btc_mining_ctx = NULL;
+	mining_ipc_disconnect(ctx);
 	return NULL;
 }
 #endif
+
+/* Called from the main thread once a shutdown has been signalled (ckpool.shutdown
+ * set), before the process exits. Waits, bounded, for the ipcnotify thread to
+ * finish disconnecting from the mining IPC on its own thread-affine capnp
+ * thread (it clears btc_mining_ctx when done). Safe to call unconditionally:
+ * btc_mining_ctx is never set when the IPC interface is unused. */
+void stratifier_shutdown_ipc(void)
+{
+	int waited = 0;
+
+	while (ckpool.btc_mining_ctx && waited++ < 100)
+		cksleep_ms(50);
+}
 
 void *stratifier(void *arg)
 {

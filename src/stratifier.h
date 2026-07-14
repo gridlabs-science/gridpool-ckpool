@@ -100,6 +100,7 @@ void parse_upstream_workinfo(yyjson_mut_val *val);
 void parse_upstream_block(yyjson_mut_doc *doc, yyjson_mut_val *val);
 void parse_upstream_reqtxns(yyjson_mut_val *val);
 char *stratifier_stats(void *data);
+void stratifier_shutdown_ipc(void);
 void _stratifier_add_yyrecv(yyjson_mut_doc *doc, const char *file, const char *func, const int line);
 #define stratifier_add_yyrecv(val) _stratifier_add_yyrecv(doc, __FILE__, __func__, __LINE__)
 void *stratifier(void *arg);

@@ -1983,6 +1983,13 @@ int main(int argc, char **argv)
 	if (ckpool_shutdown)
 		LOGWARNING("Process %s received signal %d, shutting down", ckpool.name, (int)ckpool_shutdown);
 
+	/* Signal subsystems that we are shutting down and give the mining IPC
+	 * notifier a chance to disconnect from bitcoind cleanly before the
+	 * process exits and the socket is closed from under any in-flight
+	 * request. */
+	ckpool.shutdown = true;
+	stratifier_shutdown_ipc();
+
 	clean_up();
 
 	return 0;
