@@ -2026,7 +2026,7 @@ static void *proxy_send(void __maybe_unused *arg)
 		doc = yyjson_mut_doc_new(&ckyyalc);
 		jobid = NULL;
 		mutex_lock(&gdata->notify_lock);
-		HASH_FIND_INT(gdata->notify_instances, &id, ni);
+		HASH_FIND_I64(gdata->notify_instances, &id, ni);
 		if (ni)
 			jobid = yyjson_mut_val_mut_copy(doc, yyjson_mut_doc_get_root(ni->jobid));
 		mutex_unlock(&gdata->notify_lock);
