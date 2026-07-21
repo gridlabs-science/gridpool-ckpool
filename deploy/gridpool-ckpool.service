@@ -8,6 +8,7 @@ Type=simple
 Environment=GRIDPOOL_OPERATOR_ADDRESS=replace-with-valid-mainnet-address
 Environment=GRIDPOOL_STRATUM_PORT=3335
 Environment=GRIDPOOL_DEFAULT_ENABLED=false
+Environment=BITCOIN_ZMQ_HASHBLOCK=tcp://127.0.0.1:28332
 ExecStart=%h/.local/libexec/gridpool-ckpool-launcher
 Restart=always
 RestartSec=5

@@ -4,6 +4,7 @@ set -euo pipefail
 CKPOOL_BIN="${CKPOOL_BIN:-$HOME/.local/libexec/gridpool-ckpool}"
 BITCOIN_COOKIE_FILE="${BITCOIN_COOKIE_FILE:-$HOME/.bitcoin/.cookie}"
 BITCOIN_RPC_HOST="${BITCOIN_RPC_HOST:-127.0.0.1:8334}"
+BITCOIN_ZMQ_HASHBLOCK="${BITCOIN_ZMQ_HASHBLOCK:-tcp://127.0.0.1:28332}"
 GRIDPOOL_ADAPTER_SOCKET="${GRIDPOOL_ADAPTER_SOCKET:-$HOME/.local/run/gridpool/ckpool-adapter.sock}"
 GRIDPOOL_OPERATOR_ADDRESS="${GRIDPOOL_OPERATOR_ADDRESS:?set GRIDPOOL_OPERATOR_ADDRESS}"
 GRIDPOOL_FIXED_ADDRESS="${GRIDPOOL_FIXED_ADDRESS:-}"
@@ -26,6 +27,7 @@ jq -n \
   --arg rpc_host "$BITCOIN_RPC_HOST" \
   --arg rpc_user "$rpc_user" \
   --arg rpc_pass "$rpc_pass" \
+  --arg zmqblock "$BITCOIN_ZMQ_HASHBLOCK" \
   --arg fallback "$GRIDPOOL_OPERATOR_ADDRESS" \
   --arg server "0.0.0.0:$GRIDPOOL_STRATUM_PORT" \
   --arg socket "$GRIDPOOL_ADAPTER_SOCKET" \
@@ -34,6 +36,7 @@ jq -n \
   --argjson default_enabled "$GRIDPOOL_DEFAULT_ENABLED" \
   '{
     btcd: [{url: $rpc_host, auth: $rpc_user, pass: $rpc_pass, notify: true}],
+    zmqblock: $zmqblock,
     btcaddress: $fallback,
     serverurl: [$server],
     update_interval: 10,
