@@ -37,6 +37,7 @@
 #include "utlist.h"
 #include "connector.h"
 #include "generator.h"
+#include "gridpool_adapter.h"
 
 /* Consistent across all pool instances */
 static const char *workpadding = "000000800000000000000000000000000000000000000000000000000000000000000000000000000000000080020000";
@@ -119,6 +120,13 @@ struct userwb {
 	uchar *coinb2bin; // Coinb2 cointaining this user's address for generation
 	char *coinb2;
 	int coinb2len; // Length of user coinb2
+
+	uchar *gridpool_coinb2bin;
+	char *gridpool_coinb2;
+	int gridpool_coinb2len;
+	bool gridpool_fee;
+	char gridpool_slot0_address[128];
+	char gridpool_miner_address[128];
 };
 
 struct user_instance;
@@ -283,6 +291,8 @@ struct stratum_instance {
 	char *useragent;
 	char *workername;
 	char *password;
+	bool gridpool;
+	time_t gridpool_last_pulse;
 	bool messages; /* Is this a client that understands stratum messages */
 	int user_id;
 	int server; /* Which server is this instance bound to */
@@ -387,7 +397,7 @@ struct txntable {
  * and hex encoded into buffers sized to their actual content, so this exists
  * only to keep those allocations bounded rather than to limit legitimate
  * pools; it is generous enough to cover large direct payout coinbases. */
-#define MAX_COINBASE_LEN 8192
+#define MAX_COINBASE_LEN 65536
 
 /* Upper bound on the number of transactions accepted in a block template.
  * This is the capacity of the fixed 16 entry merkle arrays (2^16 leaves) and
@@ -414,6 +424,10 @@ struct stratifier_data {
 	int txnlen;
 	char dontxnbin[48];
 	int dontxnlen;
+	char gridpool_fixed_txnbin[48];
+	int gridpool_fixed_txnlen;
+	char gridpool_operator_txnbin[48];
+	int gridpool_operator_txnlen;
 
 	pool_stats_t stats;
 	/* Protects changes to pool stats */
@@ -461,6 +475,8 @@ struct stratifier_data {
 	ckmsgq_t *sshareq;	// Stratum share sends
 	ckmsgq_t *sauthq;	// Stratum authorisations
 	ckmsgq_t *stxnq;	// Transaction requests
+	ckmsgq_t *gridpoolq;	// Nonblocking GridPool proof submissions
+	ckmsgq_t *gridpooltelemetryq; // Nonblocking local vardiff telemetry
 
 	int user_instance_id;
 
@@ -808,6 +824,8 @@ static void clear_userwb(sdata_t *sdata, int64_t id)
 		HASH_DEL(instance->userwbs, userwb);
 		free(userwb->coinb2bin);
 		free(userwb->coinb2);
+		free(userwb->gridpool_coinb2bin);
+		free(userwb->gridpool_coinb2);
 		free(userwb);
 	}
 	ck_wunlock(&sdata->instance_lock);
@@ -826,6 +844,7 @@ static void clear_workbase(workbase_t *wb)
 	free(wb->coinb2bin);
 	free(wb->coinb2);
 	free(wb->coinb3bin);
+	gridpool_plan_clear(&wb->gridpool_plan);
 	if (wb->yymerkle_doc)
 		yyjson_mut_doc_free(wb->yymerkle_doc);
 	if (wb->gbtdoc)
@@ -1038,6 +1057,159 @@ static void send_workinfo(sdata_t *sdata, const workbase_t *wb)
 		send_node_workinfo(sdata, wb);
 }
 
+static size_t serialize_compact_size(unsigned char *destination, uint64_t value)
+{
+	if (value < 0xfd) {
+		destination[0] = value;
+		return 1;
+	}
+	if (value <= UINT16_MAX) {
+		uint16_t encoded = htole16((uint16_t)value);
+
+		destination[0] = 0xfd;
+		memcpy(destination + 1, &encoded, sizeof(encoded));
+		return 3;
+	}
+	if (value <= UINT32_MAX) {
+		uint32_t encoded = htole32((uint32_t)value);
+
+		destination[0] = 0xfe;
+		memcpy(destination + 1, &encoded, sizeof(encoded));
+		return 5;
+	}
+	{
+		uint64_t encoded = htole64(value);
+
+		destination[0] = 0xff;
+		memcpy(destination + 1, &encoded, sizeof(encoded));
+		return 9;
+	}
+}
+
+static bool gridpool_plan_matches_workbase(const gridpool_plan_t *plan, const workbase_t *wb)
+{
+	unsigned char display[32], swapped[32];
+	char stratum_parent[65];
+
+	if (!plan->available || !hex2bin(display, plan->parent_hash, sizeof(display)))
+		return false;
+	swap_256(swapped, display);
+	__bin2hex(stratum_parent, swapped, sizeof(swapped));
+	return !strncmp(stratum_parent, wb->prevhash, 64);
+}
+
+static void load_gridpool_plan(workbase_t *wb)
+{
+	if (!ckpool.gridpool_enabled)
+		return;
+	if (!gridpool_adapter_get_plan(ckpool.gridpool_adapter_socket,
+				       (size_t)ckpool.gridpool_adapter_max_message_bytes,
+				       &wb->gridpool_plan)) {
+		LOGWARNING("GridPool adapter has no valid work plan; opted-in clients will be paused");
+		return;
+	}
+	if (!gridpool_plan_matches_workbase(&wb->gridpool_plan, wb)) {
+		LOGWARNING("GridPool work plan parent %s does not match CKPool workbase parent",
+			   wb->gridpool_plan.parent_hash);
+		gridpool_plan_clear(&wb->gridpool_plan);
+		return;
+	}
+	LOGDEBUG("Loaded GridPool plan %s snapshot %s with %u suffix outputs",
+		 wb->gridpool_plan.plan_id, wb->gridpool_plan.snapshot_id,
+		 wb->gridpool_plan.suffix_outputs);
+}
+
+static bool build_gridpool_userwb(sdata_t *sdata, workbase_t *wb, user_instance_t *user,
+				  struct userwb *userwb)
+{
+	const unsigned char *miner_script;
+	const char *miner_address;
+	unsigned char count[9], *cursor;
+	char payout_script_hex[97];
+	uint64_t slot_zero_value, encoded_value;
+	uint32_t locktime;
+	int miner_script_len;
+	int64_t bucket = 0;
+	size_t count_len, prefix_len, witness_len, total_len;
+	bool fee_active = false;
+
+	if (!wb->gridpool_plan.available || wb->coinb2len < 9)
+		return false;
+	if (ckpool.gridpool_fixed_address) {
+		miner_script = (unsigned char *)sdata->gridpool_fixed_txnbin;
+		miner_script_len = sdata->gridpool_fixed_txnlen;
+		miner_address = ckpool.gridpool_fixed_address;
+	} else {
+		if (!user->btcaddress)
+			return false;
+		miner_script = (unsigned char *)user->txnbin;
+		miner_script_len = user->txnlen;
+		miner_address = user->username;
+	}
+	__bin2hex(payout_script_hex, miner_script, miner_script_len);
+	strncpy(userwb->gridpool_miner_address, miner_address,
+		sizeof(userwb->gridpool_miner_address) - 1);
+	if (!gridpool_adapter_fee_decision(ckpool.gridpool_adapter_socket,
+					   (size_t)ckpool.gridpool_adapter_max_message_bytes,
+					   wb->gridpool_plan.parent_hash, payout_script_hex,
+					   wb->gentime.tv_sec ? wb->gentime.tv_sec : time(NULL),
+					   &fee_active, &bucket)) {
+		LOGWARNING("Unable to obtain GridPool fee decision for workbase %s", wb->idstring);
+		return false;
+	}
+	if (fee_active) {
+		miner_script = (unsigned char *)sdata->gridpool_operator_txnbin;
+		miner_script_len = sdata->gridpool_operator_txnlen;
+		miner_address = ckpool.gridpool_operator_address;
+	}
+	if (wb->coinbasevalue < wb->gridpool_plan.suffix_value)
+		return false;
+	slot_zero_value = wb->coinbasevalue - wb->gridpool_plan.suffix_value;
+	count_len = serialize_compact_size(count,
+		1 + wb->gridpool_plan.suffix_outputs + (wb->insert_witness ? 1 : 0));
+	prefix_len = (size_t)wb->coinb2len - 9; /* Replace legacy one-byte count and value. */
+	witness_len = wb->insert_witness ? 8 + 1 + 2 + witnessdata_size : 0;
+	total_len = prefix_len + count_len + 8 + 1 + miner_script_len +
+		wb->gridpool_plan.suffix_len + witness_len + 4;
+	if (total_len > (size_t)ckpool.gridpool_max_coinbase_bytes)
+		return false;
+	userwb->gridpool_coinb2bin = ckzalloc(total_len);
+	cursor = userwb->gridpool_coinb2bin;
+	memcpy(cursor, wb->coinb2bin, prefix_len);
+	cursor += prefix_len;
+	memcpy(cursor, count, count_len);
+	cursor += count_len;
+	encoded_value = htole64(slot_zero_value);
+	memcpy(cursor, &encoded_value, sizeof(encoded_value));
+	cursor += sizeof(encoded_value);
+	*cursor++ = miner_script_len;
+	memcpy(cursor, miner_script, miner_script_len);
+	cursor += miner_script_len;
+	memcpy(cursor, wb->gridpool_plan.suffix, wb->gridpool_plan.suffix_len);
+	cursor += wb->gridpool_plan.suffix_len;
+	if (wb->insert_witness) {
+		memset(cursor, 0, 8);
+		cursor += 8;
+		*cursor++ = witnessdata_size + 2;
+		*cursor++ = 0x6a;
+		*cursor++ = witnessdata_size;
+		hex2bin(cursor, wb->witnessdata, witnessdata_size);
+		cursor += witnessdata_size;
+	}
+	locktime = htole32(wb->height - 1);
+	memcpy(cursor, &locktime, sizeof(locktime));
+	cursor += sizeof(locktime);
+	userwb->gridpool_coinb2len = (int)(cursor - userwb->gridpool_coinb2bin);
+	userwb->gridpool_coinb2 = bin2hex(userwb->gridpool_coinb2bin,
+					 userwb->gridpool_coinb2len);
+	userwb->gridpool_fee = fee_active;
+	strncpy(userwb->gridpool_slot0_address, miner_address,
+		sizeof(userwb->gridpool_slot0_address) - 1);
+	LOGDEBUG("Built GridPool workbase %s for %s fee=%s bucket=%"PRId64,
+		 wb->idstring, user->username, fee_active ? "true" : "false", bucket);
+	return true;
+}
+
 /* Entered with instance_lock held, make sure wb can't be pulled from us */
 static void __generate_userwb(sdata_t *sdata, workbase_t *wb, user_instance_t *user)
 {
@@ -1061,6 +1233,8 @@ static void __generate_userwb(sdata_t *sdata, workbase_t *wb, user_instance_t *u
 	memcpy(userwb->coinb2bin + userwb->coinb2len, wb->coinb3bin, wb->coinb3len);
 	userwb->coinb2len += wb->coinb3len;
 	userwb->coinb2 = bin2hex(userwb->coinb2bin, userwb->coinb2len);
+	if (ckpool.gridpool_enabled)
+		build_gridpool_userwb(sdata, wb, user, userwb);
 	HASH_ADD_I64(user->userwbs, id, userwb);
 }
 
@@ -1070,7 +1244,7 @@ static void generate_userwbs(sdata_t *sdata, workbase_t *wb)
 
 	ck_wlock(&sdata->instance_lock);
 	HASH_ITER(hh, sdata->user_instances, instance, tmp) {
-		if (!instance->btcaddress)
+		if (!instance->btcaddress && !ckpool.gridpool_fixed_address)
 			continue;
 		__generate_userwb(sdata, wb, instance);
 	}
@@ -1719,6 +1893,7 @@ retry:
 	}
 
 	generate_coinbase(wb);
+	load_gridpool_plan(wb);
 
 	add_base(sdata, wb, &new_block);
 
@@ -5841,14 +6016,15 @@ static void client_auth(stratum_instance_t *client, user_instance_t *user,
 	client->authorising = false;
 }
 
-static yyjson_mut_doc *__user_notify(const workbase_t *wb, const user_instance_t *user, const bool clean);
+static yyjson_mut_doc *__user_notify(const workbase_t *wb, const stratum_instance_t *client, const bool clean);
 
 static void update_solo_client(sdata_t *sdata, workbase_t *wb, const int64_t client_id,
-				 user_instance_t *user_instance)
+				 stratum_instance_t *client)
 {
-	yyjson_mut_doc *doc = __user_notify(wb, user_instance, true);
+	yyjson_mut_doc *doc = __user_notify(wb, client, true);
 
-	stratum_add_yysend(sdata, doc, client_id, SM_UPDATE);
+	if (doc)
+		stratum_add_yysend(sdata, doc, client_id, SM_UPDATE);
 }
 
 /* Needs to be entered with client holding a ref count. */
@@ -5903,6 +6079,8 @@ static bool parse_authorise(stratum_instance_t *client, yyjson_mut_val *params_v
 		client->password = strndup(pass, 64);
 	else
 		client->password = strdup("");
+	client->gridpool = ckpool.gridpool_enabled &&
+		(ckpool.gridpool_default_enabled || gridpool_password_enabled(client->password));
 	if (user->failed_authtime) {
 		time_t now_t = time(NULL);
 
@@ -5919,7 +6097,8 @@ static bool parse_authorise(stratum_instance_t *client, yyjson_mut_val *params_v
 			goto out;
 		}
 	}
-	if (!ckpool.btcsolo || client->user_instance->btcaddress)
+	if (!ckpool.btcsolo || client->user_instance->btcaddress ||
+	    (client->gridpool && ckpool.gridpool_fixed_address))
 		ret = true;
 
 	/* We do the preauth etc. in remote mode, and leave final auth to
@@ -5941,7 +6120,7 @@ out:
 		__generate_userwb(sdata, wb, user);
 		ck_wunlock(&sdata->instance_lock);
 
-		update_solo_client(sdata, wb, client->id, user);
+		update_solo_client(sdata, wb, client->id, client);
 
 		ck_wlock(&sdata->workbase_lock);
 		wb->readcount--;
@@ -6285,6 +6464,14 @@ static inline uchar *__user_coinb2(const stratum_instance_t *client, const workb
 	HASH_FIND_I64(client->user_instance->userwbs, &id, userwb);
 	if (unlikely(!userwb))
 		goto out_nouserwb;
+	if (client->gridpool) {
+		if (!userwb->gridpool_coinb2bin) {
+			*cb2len = 0;
+			return NULL;
+		}
+		*cb2len = userwb->gridpool_coinb2len;
+		return userwb->gridpool_coinb2bin;
+	}
 	*cb2len = userwb->coinb2len;
 	return userwb->coinb2bin;
 
@@ -6296,7 +6483,8 @@ out_nouserwb:
 /* Needs to be entered with workbase readcount and client holding a ref count. */
 static double submission_diff(sdata_t *sdata, const stratum_instance_t *client, const workbase_t *wb,
 			      const char *nonce2, const uint32_t ntime32, uint32_t version_mask,
-			      const char *nonce, uchar *hash, const bool stale)
+			      const char *nonce, uchar *hash, const bool stale,
+			      char **coinbase_hex_out, char **header_hex_out)
 {
 	unsigned char merkle_root[32], merkle_sha[64];
 	uint32_t *data32, *swap32, benonce32;
@@ -6313,6 +6501,10 @@ static double submission_diff(sdata_t *sdata, const stratum_instance_t *client, 
 	 * content while the lock is held. */
 	ck_rlock(&sdata->instance_lock);
 	coinb2bin = __user_coinb2(client, wb, &cb2len);
+	if (unlikely(!coinb2bin || cb2len <= 0)) {
+		ck_runlock(&sdata->instance_lock);
+		return -1;
+	}
 	coinbase = alloca(wb->coinb1len + wb->enonce1constlen + wb->enonce1varlen +
 			  wb->enonce2varlen + cb2len);
 	memcpy(coinbase, wb->coinb1bin, wb->coinb1len);
@@ -6363,6 +6555,10 @@ static double submission_diff(sdata_t *sdata, const stratum_instance_t *client, 
 	flip_80(swap32, data32);
 	sha256(swap, 80, hash1);
 	sha256(hash1, 32, hash);
+	if (client->gridpool) {
+		*coinbase_hex_out = bin2hex(coinbase, cblen);
+		*header_hex_out = bin2hex(swap, 80);
+	}
 
 	/* Calculate the diff of the share here */
 	ret = diff_from_target(hash);
@@ -6453,6 +6649,110 @@ static void check_best_diff(sdata_t *sdata, user_instance_t *user,worker_instanc
 	stratum_send_message(sdata, client, buf);
 }
 
+static void gridpool_proof_process(void *arg)
+{
+	char *proof_json = arg;
+
+	if (!gridpool_adapter_submit_proof(ckpool.gridpool_adapter_socket,
+					   (size_t)ckpool.gridpool_adapter_max_message_bytes,
+					   proof_json))
+		LOGWARNING("Failed to queue GridPool proof in local adapter");
+	free(proof_json);
+}
+
+struct gridpool_share_telemetry {
+	char channel_id[128];
+	char payout_address[128];
+	char username[128];
+	bool accepted;
+	double difficulty;
+	bool fee_work;
+	int64_t observed_unix_ms;
+};
+
+static void gridpool_telemetry_process(void *arg)
+{
+	struct gridpool_share_telemetry *telemetry = arg;
+
+	if (!gridpool_adapter_record_share(ckpool.gridpool_adapter_socket,
+					   (size_t)ckpool.gridpool_adapter_max_message_bytes,
+					   telemetry->channel_id, telemetry->payout_address,
+					   telemetry->username, telemetry->accepted,
+					   telemetry->difficulty, telemetry->fee_work,
+					   telemetry->observed_unix_ms))
+		LOGWARNING("Failed to record GridPool vardiff telemetry in local adapter");
+	free(telemetry);
+}
+
+static bool gridpool_job_metadata(const stratum_instance_t *client, const workbase_t *wb,
+				  char *slot0_address, size_t slot0_length,
+				  char *miner_address, size_t miner_length, bool *fee_work)
+{
+	struct userwb *userwb;
+	bool found = false;
+
+	if (!client->gridpool || !wb->gridpool_plan.available)
+		return false;
+	ck_rlock(&client->sdata->instance_lock);
+	HASH_FIND_I64(client->user_instance->userwbs, &wb->id, userwb);
+	if (userwb && userwb->gridpool_slot0_address[0]) {
+		if (slot0_address && slot0_length) {
+			strncpy(slot0_address, userwb->gridpool_slot0_address, slot0_length - 1);
+			slot0_address[slot0_length - 1] = '\0';
+		}
+		if (miner_address && miner_length) {
+			strncpy(miner_address, userwb->gridpool_miner_address, miner_length - 1);
+			miner_address[miner_length - 1] = '\0';
+		}
+		if (fee_work)
+			*fee_work = userwb->gridpool_fee;
+		found = true;
+	}
+	ck_runlock(&client->sdata->instance_lock);
+	return found;
+}
+
+static char *build_gridpool_proof_json(const stratum_instance_t *client, const workbase_t *wb,
+				       const char *header_hex, const char *coinbase_hex,
+				       double difficulty, bool *pulse_proof)
+{
+	yyjson_mut_doc *document;
+	yyjson_mut_val *root, *path;
+	char slot0_address[128] = {};
+	char *encoded;
+	int i;
+
+	*pulse_proof = false;
+	if (!client->gridpool || !header_hex || !coinbase_hex || !wb->gridpool_plan.available)
+		return NULL;
+	if (difficulty < wb->gridpool_plan.minimum_reserve_difficulty) {
+		if (difficulty < wb->gridpool_plan.minimum_pulse_difficulty ||
+		    time(NULL) - __atomic_load_n(&client->gridpool_last_pulse, __ATOMIC_RELAXED) < 30)
+			return NULL;
+		*pulse_proof = true;
+	}
+	if (!gridpool_job_metadata(client, wb, slot0_address, sizeof(slot0_address),
+				   NULL, 0, NULL))
+		return NULL;
+	document = yyjson_mut_doc_new(&ckyyalc);
+	root = yyjson_mut_obj(document);
+	yyjson_mut_doc_set_root(document, root);
+	yyjson_mut_obj_add_str(document, root, "minerAddress", slot0_address);
+	yyjson_mut_obj_add_str(document, root, "username", client->workername);
+	yyjson_mut_obj_add_str(document, root, "headerHex", header_hex);
+	yyjson_mut_obj_add_str(document, root, "coinbaseHex", coinbase_hex);
+	yyjson_mut_obj_add_str(document, root, "payoutSnapshotId", wb->gridpool_plan.snapshot_id);
+	yyjson_mut_obj_add_str(document, root, "prevBlockHash", wb->gridpool_plan.parent_hash);
+	yyjson_mut_obj_add_real(document, root, "difficulty", difficulty);
+	path = yyjson_mut_arr(document);
+	for (i = 0; i < wb->merkles; i++)
+		yyjson_mut_arr_add_str(document, path, wb->merklehash[i]);
+	yyjson_mut_obj_add_val(document, root, "merklePath", path);
+	encoded = yyjson_mut_write(document, 0, NULL);
+	yyjson_mut_doc_free(document);
+	return encoded;
+}
+
 /* Needs to be entered with client holding a ref count. */
 static bool parse_submit(stratum_instance_t *client, yyjson_mut_val *params_val,
 			 enum share_err *err_code)
@@ -6463,6 +6763,10 @@ static bool parse_submit(stratum_instance_t *client, yyjson_mut_val *params_val,
 	char hexhash[68] = {}, sharehash[32], cdfield[64];
 	user_instance_t *user = client->user_instance;
 	char *fname = NULL, *nonce, *nonce2;
+	char *gridpool_coinbase_hex = NULL, *gridpool_header_hex = NULL, *gridpool_proof = NULL;
+	char gridpool_miner_address[128] = {};
+	bool gridpool_fee_work = false, gridpool_metadata = false;
+	bool gridpool_pulse_proof = false;
 	uint32_t ntime32, version_mask32 = 0;
 	sdata_t *sdata = client->sdata;
 	enum share_err err = SE_NONE;
@@ -6576,7 +6880,17 @@ static bool parse_submit(stratum_instance_t *client, yyjson_mut_val *params_val,
 	}
 	if (id < sdata->blockchange_id)
 		stale = true;
-	sdiff = submission_diff(sdata, client, wb, nonce2, ntime32, version_mask32, nonce, hash, stale);
+	sdiff = submission_diff(sdata, client, wb, nonce2, ntime32, version_mask32, nonce, hash, stale,
+			       &gridpool_coinbase_hex, &gridpool_header_hex);
+	if (unlikely(sdiff < 0)) {
+		err = SE_NO_WORKBASE;
+		goto out_put;
+	}
+	gridpool_metadata = gridpool_job_metadata(client, wb, NULL, 0,
+						  gridpool_miner_address,
+						  sizeof(gridpool_miner_address), &gridpool_fee_work);
+	gridpool_proof = build_gridpool_proof_json(client, wb, gridpool_header_hex,
+					   gridpool_coinbase_hex, sdiff, &gridpool_pulse_proof);
 	if (sdiff > client->best_diff) {
 		worker_instance_t *worker = client->worker_instance;
 
@@ -6661,6 +6975,36 @@ out_nowb:
 		LOGINFO("Submitting share upstream: %s", hexhash);
 		submit_share(client, id, nonce2, ntime, nonce);
 	}
+	if (result && gridpool_proof) {
+		bool queue_proof = true;
+
+		if (gridpool_pulse_proof) {
+			time_t previous = __atomic_load_n(&client->gridpool_last_pulse, __ATOMIC_RELAXED);
+
+			queue_proof = now_t - previous >= 30 &&
+				__atomic_compare_exchange_n(&client->gridpool_last_pulse, &previous,
+					now_t, false, __ATOMIC_RELAXED, __ATOMIC_RELAXED);
+		}
+		if (queue_proof) {
+			ckmsgq_add(sdata->gridpoolq, gridpool_proof);
+			gridpool_proof = NULL;
+		}
+	}
+	if (result && gridpool_metadata) {
+		struct gridpool_share_telemetry *telemetry = ckzalloc(sizeof(*telemetry));
+
+		strncpy(telemetry->channel_id, client->identity,
+			sizeof(telemetry->channel_id) - 1);
+		strncpy(telemetry->payout_address, gridpool_miner_address,
+			sizeof(telemetry->payout_address) - 1);
+		strncpy(telemetry->username, client->workername,
+			sizeof(telemetry->username) - 1);
+		telemetry->accepted = true;
+		telemetry->difficulty = sdiff;
+		telemetry->fee_work = gridpool_fee_work;
+		telemetry->observed_unix_ms = (int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+		ckmsgq_add(sdata->gridpooltelemetryq, telemetry);
+	}
 
 	add_submit(client, diff, result, submit);
 
@@ -6729,6 +7073,9 @@ out:
 	if (!share)
 		LOGINFO("Invalid share from client %s: %s", client->identity, client->workername);
 	free(fname);
+	free(gridpool_coinbase_hex);
+	free(gridpool_header_hex);
+	free(gridpool_proof);
 	*err_code = err;
 	return result;
 }
@@ -6789,8 +7136,10 @@ static void stratum_send_update(sdata_t *sdata, const int64_t client_id, const b
 }
 
 /* Hold instance and workbase lock */
-static yyjson_mut_doc *__user_notify(const workbase_t *wb, const user_instance_t *user, const bool clean)
+static yyjson_mut_doc *__user_notify(const workbase_t *wb, const stratum_instance_t *client, const bool clean)
 {
+	const user_instance_t *user = client->user_instance;
+	const char *coinb2;
 	int64_t id = wb->id;
 	struct userwb *userwb;
 	yyjson_mut_doc *doc;
@@ -6801,6 +7150,14 @@ static yyjson_mut_doc *__user_notify(const workbase_t *wb, const user_instance_t
 		LOGINFO("Failed to find userwb in __user_notify!");
 		return NULL;
 	}
+	if (client->gridpool) {
+		if (!userwb->gridpool_coinb2) {
+			LOGNOTICE("Pausing GridPool client %s: no matching payout plan", client->identity);
+			return NULL;
+		}
+		coinb2 = userwb->gridpool_coinb2;
+	} else
+		coinb2 = userwb->coinb2;
 
 	doc = yyjson_mut_doc_new(&ckyyalc);
 	root = yyjson_mut_pack_val(doc, "{s:[ssssosssb],s:n,s:s}",
@@ -6808,7 +7165,7 @@ static yyjson_mut_doc *__user_notify(const workbase_t *wb, const user_instance_t
 		wb->idstring,
 		wb->prevhash,
 		wb->coinb1,
-		userwb->coinb2,
+		coinb2,
 		yyjson_mut_doc_get_root(wb->yymerkle_doc),
 		wb->bbversion,
 		wb->nbit,
@@ -6835,7 +7192,7 @@ static void stratum_broadcast_updates(sdata_t *sdata, bool clean)
 		ck_wunlock(&sdata->instance_lock);
 
 		ck_rlock(&sdata->workbase_lock);
-		doc = __user_notify(sdata->current_workbase, client->user_instance, clean);
+		doc = __user_notify(sdata->current_workbase, client, clean);
 		ck_runlock(&sdata->workbase_lock);
 
 		if (likely(doc))
@@ -9204,6 +9561,27 @@ void *stratifier(void *arg)
 			ckpool.regtest = true;
 		} else
 			LOGNOTICE("No valid donation address found");
+
+		if (ckpool.gridpool_enabled) {
+			bool script = false, segwit = false;
+
+			if (!generator_checkaddr(ckpool.gridpool_operator_address, &script, &segwit)) {
+				LOGEMERG("Fatal: gridpool_operator_address invalid according to bitcoind");
+				goto out;
+			}
+			sdata->gridpool_operator_txnlen = address_to_txn(sdata->gridpool_operator_txnbin,
+				ckpool.gridpool_operator_address, script, segwit);
+			if (ckpool.gridpool_fixed_address) {
+				script = segwit = false;
+				if (!generator_checkaddr(ckpool.gridpool_fixed_address, &script, &segwit)) {
+					LOGEMERG("Fatal: gridpool_fixed_address invalid according to bitcoind");
+					goto out;
+				}
+				sdata->gridpool_fixed_txnlen = address_to_txn(sdata->gridpool_fixed_txnbin,
+					ckpool.gridpool_fixed_address, script, segwit);
+			}
+			LOGNOTICE("GridPool adapter enabled on %s", ckpool.gridpool_adapter_socket);
+		}
 	}
 
 	randomiser = time(NULL);
@@ -9228,6 +9606,11 @@ void *stratifier(void *arg)
 	sdata->sauthq = create_ckmsgq("authoriser", &sauth_process);
 	sdata->stxnq = create_ckmsgq("stxnq", &send_transactions);
 	sdata->srecvs = create_ckmsgqs("sreceiver", &srecv_process, threads);
+	if (ckpool.gridpool_enabled)
+		sdata->gridpoolq = create_ckmsgq("gridpool", &gridpool_proof_process);
+	if (ckpool.gridpool_enabled)
+		sdata->gridpooltelemetryq = create_ckmsgq("gridpooltelemetry",
+							 &gridpool_telemetry_process);
 	create_pthread(&pth_throbber, throbber, NULL);
 	read_poolstats(&tvsec_diff);
 	read_userstats(sdata, tvsec_diff);

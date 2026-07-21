@@ -272,6 +272,15 @@ struct ckpool_instance {
 	bool donvalid; // Donation address works on this network
 	double donation; // Percentage donation to development
 
+	/* Optional local GridPool adapter integration. */
+	bool gridpool_enabled;
+	bool gridpool_default_enabled;
+	char *gridpool_adapter_socket;
+	char *gridpool_fixed_address;
+	char *gridpool_operator_address;
+	int gridpool_max_coinbase_bytes;
+	int gridpool_adapter_max_message_bytes;
+
 	/* Stratum options */
 	server_instance_t **servers;
 	char **serverurl; // Array of URLs to bind our server/proxy to

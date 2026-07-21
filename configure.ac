@@ -25,6 +25,7 @@ fi
 
 dnl Checks for programs
 AC_PROG_CC
+AC_PROG_RANLIB
 dnl C++ compiler required for the optional Cap'n Proto mining IPC shim
 AC_PROG_CXX
 # gl_EARLY - maybe later

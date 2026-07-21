@@ -1,5 +1,8 @@
 CKPOOL + CKPROXY + libckpool by Con Kolivas
 
+Optional GridPool integration is documented in `GRIDPOOL.md`. Connections that
+do not opt in retain ordinary CKPool behavior.
+
 Ultra low overhead massively scalable multi-process, multi-threaded modular
 bitcoin mining pool, proxy, passthrough, and library in c for Linux.
 CKPOOL is code provided free of charge under the GPLv3 license but its

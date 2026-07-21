@@ -1,0 +1,18 @@
+{
+  "btcd": [{
+    "url": "127.0.0.1:8332",
+    "auth": "bitcoin-rpc-user",
+    "pass": "replace-me",
+    "notify": true
+  }],
+  "btcaddress": "replace-with-valid-fallback-address",
+  "serverurl": ["0.0.0.0:3333"],
+  "update_interval": 10,
+  "gridpool_enabled": true,
+  "gridpool_default_enabled": false,
+  "gridpool_adapter_socket": "/run/gridpool/ckpool-adapter.sock",
+  "gridpool_operator_address": "replace-with-atlas-operator-address",
+  "gridpool_max_coinbase_bytes": 65536,
+  "gridpool_adapter_max_message_bytes": 262144
+}
+

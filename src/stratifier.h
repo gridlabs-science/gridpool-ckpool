@@ -10,6 +10,8 @@
 #ifndef STRATIFIER_H
 #define STRATIFIER_H
 
+#include "gridpool_adapter.h"
+
 /* Generic structure for both workbase in stratifier and gbtbase in generator */
 struct genwork {
 	/* Hash table data */
@@ -74,6 +76,9 @@ struct genwork {
 	int coinb2len; // length of above
 	char *coinb3bin; // coinbase3 for variable coinb2len
 	int coinb3len; // length of above
+
+	/* Immutable GridPool payout plan associated with this workbase. */
+	gridpool_plan_t gridpool_plan;
 
 	/* Cached header binary */
 	char headerbin[112];

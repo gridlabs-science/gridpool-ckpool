@@ -1564,6 +1564,14 @@ static void parse_config(void)
 		ckpool.donation = 0;
 	else if (ckpool.donation > 99.9)
 		ckpool.donation = 99.9;
+	yyjson_obj_get_bool(&ckpool.gridpool_enabled, json_conf, "gridpool_enabled");
+	yyjson_obj_get_bool(&ckpool.gridpool_default_enabled, json_conf, "gridpool_default_enabled");
+	yyjson_obj_get_string(&ckpool.gridpool_adapter_socket, json_conf, "gridpool_adapter_socket");
+	yyjson_obj_get_string(&ckpool.gridpool_fixed_address, json_conf, "gridpool_fixed_address");
+	yyjson_obj_get_string(&ckpool.gridpool_operator_address, json_conf, "gridpool_operator_address");
+	yyjson_obj_get_int(&ckpool.gridpool_max_coinbase_bytes, json_conf, "gridpool_max_coinbase_bytes");
+	yyjson_obj_get_int(&ckpool.gridpool_adapter_max_message_bytes, json_conf,
+			   "gridpool_adapter_max_message_bytes");
 	arr_val = yyjson_obj_get(json_conf, "proxy");
 	if (arr_val && yyjson_is_arr(arr_val)) {
 		arr_size = yyjson_arr_size(arr_val);
@@ -1854,6 +1862,23 @@ int main(int argc, char **argv)
 		quit(0, "Invalid nonce2length %d specified, must be 2~8", ckpool.nonce2length);
 	if (!ckpool.update_interval)
 		ckpool.update_interval = 30;
+	if (ckpool.gridpool_enabled) {
+		if (!ckpool.gridpool_adapter_socket)
+			ckpool.gridpool_adapter_socket = strdup("/run/gridpool/ckpool-adapter.sock");
+		if (!ckpool.gridpool_max_coinbase_bytes)
+			ckpool.gridpool_max_coinbase_bytes = 65536;
+		if (!ckpool.gridpool_adapter_max_message_bytes)
+			ckpool.gridpool_adapter_max_message_bytes = 262144;
+		if (ckpool.gridpool_max_coinbase_bytes < 10000 ||
+		    ckpool.gridpool_max_coinbase_bytes > 1000000)
+			quit(0, "gridpool_max_coinbase_bytes must be between 10000 and 1000000");
+		if (!ckpool.gridpool_operator_address)
+			quit(0, "gridpool_operator_address is required when GridPool is enabled");
+		if (ckpool.update_interval > 10) {
+			LOGWARNING("Reducing update_interval to 10 seconds for deterministic GridPool fee buckets");
+			ckpool.update_interval = 10;
+		}
+	}
 	if (!ckpool.mindiff)
 		ckpool.mindiff = 1;
 	if (!ckpool.startdiff)
