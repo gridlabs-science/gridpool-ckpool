@@ -1,0 +1,17 @@
+[Unit]
+Description=GridPool CKPool Stratum V1 gateway
+After=network-online.target gridpool-ckpool-adapter.service bitcoin-core31-gridpool.service
+Wants=network-online.target gridpool-ckpool-adapter.service bitcoin-core31-gridpool.service
+
+[Service]
+Type=simple
+Environment=GRIDPOOL_OPERATOR_ADDRESS=replace-with-valid-mainnet-address
+Environment=GRIDPOOL_STRATUM_PORT=3335
+Environment=GRIDPOOL_DEFAULT_ENABLED=false
+ExecStart=%h/.local/libexec/gridpool-ckpool-launcher
+Restart=always
+RestartSec=5
+LimitNOFILE=65535
+
+[Install]
+WantedBy=default.target

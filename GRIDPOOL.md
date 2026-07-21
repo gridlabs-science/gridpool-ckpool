@@ -43,3 +43,7 @@ a 150 basis-point work schedule produces an approximately 1.5% long-run fee.
 
 GridPool's 300-slot templates can exceed firmware-specific SV1 coinbase limits.
 Test firmware compatibility before moving material hashrate.
+
+`deploy/gridpool-ckpool-launcher.sh` reads the local Bitcoin RPC cookie at
+startup and writes a mode-0600 runtime config. This avoids persisting RPC
+credentials in source-controlled configuration.
