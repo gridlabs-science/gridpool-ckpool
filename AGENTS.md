@@ -10,5 +10,6 @@ GridPool-specific Stratum V1 integration.
 - Submit solved blocks locally before adapter notification.
 - Keep HTTP, retries, durable queues, and fee cryptography in the Rust sidecar.
 
-Validate with `make check` and an end-to-end regtest stack before deployment.
-
+Validate with `./configure && make`, using Cap'n Proto `1.1.x` for the optional
+mining IPC path, and an end-to-end regtest stack before deployment. Upstream
+does not currently provide a `make check` target.

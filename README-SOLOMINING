@@ -42,9 +42,9 @@ share/rpcauth/rpcauth.py ckpool
 This will give you a message such as:
 
 String to be appended to bitcoin.conf:
-rpcauth=ckpool:c6f55b4a74b8fcbca4e8b2be22d7d53b$e2ca5e642d7ef4f43ab2524964dc6b3625ccfde09a97866c5b97c40622192149
+rpcauth=ckpool:<generated-salt>$<generated-hmac>
 Your password:
-sI7jIjC61U9ZYTT29GnBpm0Rg1qQV9w_TXOfBF1vOM8
+<generated-rpc-password>
 
 
 Edit bitcoin.conf, enabling RPC (remote procedure calls) and add the rpcauth
