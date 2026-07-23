@@ -1100,13 +1100,29 @@ static bool gridpool_plan_matches_workbase(const gridpool_plan_t *plan, const wo
 
 static void load_gridpool_plan(workbase_t *wb)
 {
+	const int retry_delay_ms = 25;
+	const int maximum_attempts = 40;
+	int attempt;
+
 	if (!ckpool.gridpool_enabled)
 		return;
 	if (!gridpool_adapter_get_plan(ckpool.gridpool_adapter_socket,
-				       (size_t)ckpool.gridpool_adapter_max_message_bytes,
-				       &wb->gridpool_plan)) {
+					       (size_t)ckpool.gridpool_adapter_max_message_bytes,
+					       &wb->gridpool_plan)) {
 		LOGWARNING("GridPool adapter has no valid work plan; opted-in clients will be paused");
 		return;
+	}
+	for (attempt = 1;
+	     attempt < maximum_attempts && !gridpool_plan_matches_workbase(&wb->gridpool_plan, wb);
+	     attempt++) {
+		/* Bitcoin ZMQ can beat the local GridPool snapshot by a few
+		 * milliseconds. Wait briefly for the matching plan instead of
+		 * deferring GridPool clients until the periodic GBT refresh. */
+		cksleep_ms(retry_delay_ms);
+		if (!gridpool_adapter_get_plan(ckpool.gridpool_adapter_socket,
+						       (size_t)ckpool.gridpool_adapter_max_message_bytes,
+						       &wb->gridpool_plan))
+			break;
 	}
 	if (!gridpool_plan_matches_workbase(&wb->gridpool_plan, wb)) {
 		LOGWARNING("GridPool work plan parent %s does not match CKPool workbase parent",
@@ -1114,6 +1130,9 @@ static void load_gridpool_plan(workbase_t *wb)
 		gridpool_plan_clear(&wb->gridpool_plan);
 		return;
 	}
+	if (attempt > 1)
+		LOGINFO("Matched GridPool work plan after %d ms at block boundary",
+			(attempt - 1) * retry_delay_ms);
 	LOGDEBUG("Loaded GridPool plan %s snapshot %s with %u suffix outputs",
 		 wb->gridpool_plan.plan_id, wb->gridpool_plan.snapshot_id,
 		 wb->gridpool_plan.suffix_outputs);
