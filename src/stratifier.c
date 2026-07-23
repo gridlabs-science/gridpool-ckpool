@@ -7000,7 +7000,10 @@ out_nowb:
 		strncpy(telemetry->username, client->workername,
 			sizeof(telemetry->username) - 1);
 		telemetry->accepted = true;
-		telemetry->difficulty = sdiff;
+		/* Account accepted work at the assigned vardiff target. Achieved
+		 * difficulty is heavy-tailed and is only suitable for best-share
+		 * diagnostics, not hashrate accounting. */
+		telemetry->difficulty = diff;
 		telemetry->fee_work = gridpool_fee_work;
 		telemetry->observed_unix_ms = (int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
 		ckmsgq_add(sdata->gridpooltelemetryq, telemetry);
